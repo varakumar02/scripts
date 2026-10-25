@@ -14,6 +14,10 @@
 <project name="varakumar02/open_oplus_camera_blobs" path="vendor/oplus/camera-blobs" revision="aox" remote="github-ssh" />
 <project name="LineageOS/android_hardware_pixelworks_interfaces" path="hardware/pixelworks/interfaces" revision="lineage-23.2" remote="github" />
 
+<!-- Bluetooth module: our fork carrying Jammy555's dual A2DP audio sharing -->
+<remove-project path="packages/modules/Bluetooth" />
+<project name="varakumar02/packages_modules_Bluetooth" path="packages/modules/Bluetooth" revision="aox" remote="github" />
+
 <!-- GhostWire (independent pentest app, included here) -->
 <project name="varakumar02/GhostWire" path="packages/apps/GhostWire" revision="aox" remote="github" />
 

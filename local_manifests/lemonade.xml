@@ -16,8 +16,6 @@
 
 <!-- GhostWire (independent pentest app, included here) -->
 <project name="varakumar02/GhostWire" path="packages/apps/GhostWire" revision="aox" remote="github" />
-<!-- Plexo (independent multipath downloader, included here) -->
-<project name="varakumar02/plexo" path="packages/apps/Plexo" revision="aox" remote="github" />
 
 <!-- Datura firewall (port of esecoder/Datura-Firewall, included here) -->
 <project name="varakumar02/Datura-Firewall" path="packages/apps/Datura-Firewall" revision="aox" remote="github" />

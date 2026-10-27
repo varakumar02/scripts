@@ -38,9 +38,9 @@
 <project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox" remote="github" />
 
 <project name="varakumar02/scripts" path="scripts" revision="aox" remote="github">
-<linkfile src="build.sh" dest="build.sh" />
-<linkfile src="track_changes.sh" dest="track_changes.sh" />
-<linkfile src="otauploader.sh" dest="otauploader.sh" />
+<linkfile src="build/build.sh" dest="build.sh" />
+<linkfile src="sync/track_changes.sh" dest="track_changes.sh" />
+<linkfile src="release/otauploader.sh" dest="otauploader.sh" />
 </project>
 
 </manifest>

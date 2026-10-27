@@ -6,6 +6,12 @@ By <a href="https://t.me/Varakumar">T๏иy</a>
 ▫️ <b>Date:</b> {longdate}
 ▫️ <b>{hashname}:</b> <code>{hash}</code>
 
-<i>Note: Newer OOS Cam v5.045.451</i>
+<i>
+Note:
+- Reverted Display Colors to be normal
+- Setting Wallpaper from Oplus Gallery still fails
+- Will Update Dolby Audio to be more sweeter (less trebble/bass)
+- This is a CORE Build + Google Wizard Setup
+</i>
 
 #A16 #{device} #Axion #LevionKernel

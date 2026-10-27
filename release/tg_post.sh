@@ -32,7 +32,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-[[ -f "$SCRIPT_DIR/.env" ]] && { set -a; . "$SCRIPT_DIR/.env"; set +a; }
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+[[ -f "$REPO_ROOT/.env" ]] && { set -a; . "$REPO_ROOT/.env"; set +a; }
 
 DEVICE=lemonade FLAVOR=GMS URL="" TEMPLATE="$SCRIPT_DIR/tg_message.txt" NOTES="" MD5="" TEXT="" BUTTON="" RECOVERY_URL="" BETA=0 ROW2=0 CUSTOM=0 EDIT=0 DRY=0 YES=0
 while [[ $# -gt 0 ]]; do
@@ -58,10 +59,10 @@ CHANGELOG_URL="https://raw.githubusercontent.com/varakumar02/scripts/aox/OTA/GMS
 COMMUNITY_URL="https://t.me/axionos_op9"
 
 abort() { echo "error: $*" >&2; exit 1; }
-[[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] || abort "set TG_BOT_TOKEN and TG_CHAT_ID in $SCRIPT_DIR/.env (see .env.example)"
-JSON="$SCRIPT_DIR/OTA/$FLAVOR/$DEVICE.json"   # only read by the --url branch (MD5 shortcut)
+[[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] || abort "set TG_BOT_TOKEN and TG_CHAT_ID in $REPO_ROOT/.env (see .env.example)"
+JSON="$REPO_ROOT/OTA/$FLAVOR/$DEVICE.json"   # only read by the --url branch (MD5 shortcut)
 (( CUSTOM )) || {
-    [[ -n $URL || -n "${PIXELDRAIN_API_KEY:-}" ]] || abort "set PIXELDRAIN_API_KEY in $SCRIPT_DIR/.env (or pass --url)"
+    [[ -n $URL || -n "${PIXELDRAIN_API_KEY:-}" ]] || abort "set PIXELDRAIN_API_KEY in $REPO_ROOT/.env (or pass --url)"
     [[ -f $TEMPLATE ]] || abort "template $TEMPLATE not found"
 }
 

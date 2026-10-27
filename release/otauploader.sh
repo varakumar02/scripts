@@ -58,11 +58,12 @@ PD_ROOT="Axion"         # top-level folder under /me on pixeldrain
 DEVICE=""   # required: --device <name>
 IMAGES=(boot.img vendor_boot.img vbmeta.img dtbo.img vendor_dlkm.img super_empty.img)
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-FIRMWARE_SRC="$SCRIPT_DIR/firmware"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+FIRMWARE_SRC="$REPO_ROOT/firmware"
 STATE_NAME="synced_state.txt"
 STATE_FILE="repo-sync-logs/$STATE_NAME"   # track_changes.sh --save-state, relative to the build root
 
-[[ -f "$SCRIPT_DIR/.env" ]] && { set -a; . "$SCRIPT_DIR/.env"; set +a; }
+[[ -f "$REPO_ROOT/.env" ]] && { set -a; . "$REPO_ROOT/.env"; set +a; }
 PIXELDRAIN_RETENTION="${PIXELDRAIN_RETENTION:-3}"
 
 AUTO=0
@@ -103,7 +104,7 @@ abort() { echo "error: $*" >&2; exit 1; }
 [[ -n $PD_CMD || -n $DEVICE ]] || abort "no device given: pass --device <name> (e.g. --device lemonade)"
 
 if [[ ( $DO_PD -eq 1 || -n $PD_CMD ) && -z "${PIXELDRAIN_API_KEY:-}" ]]; then
-    abort "--pixeldrain requires PIXELDRAIN_API_KEY in $SCRIPT_DIR/.env (see .env.example)"
+    abort "--pixeldrain requires PIXELDRAIN_API_KEY in $REPO_ROOT/.env (see .env.example)"
 fi
 
 # pd <curl args...> -- authenticated pixeldrain API call. The key is piped in
@@ -494,7 +495,7 @@ fi
 case "$base" in *-VANILLA-*) FLAVOR=VANILLA ;; *) FLAVOR=GMS ;; esac
 SRC_JSON="out/target/product/$DEVICE/$FLAVOR/$DEVICE.json"
 DL_URL="https://downloads.sourceforge.net/project/$SF_PROJECT/$DEVICE/$verdir/$base"
-OUT_JSON="$SCRIPT_DIR/OTA/$FLAVOR/$DEVICE.json"
+OUT_JSON="$REPO_ROOT/OTA/$FLAVOR/$DEVICE.json"
 
 MANIFEST=""
 if (( BETA )); then
@@ -706,7 +707,7 @@ fi
 if [[ -n "$MANIFEST" ]]; then
     mkdir -p "$(dirname "$OUT_JSON")"
     echo "$MANIFEST" > "$OUT_JSON"
-    if git -C "$SCRIPT_DIR" add "$OUT_JSON" &&
+    if git -C "$REPO_ROOT" add "$OUT_JSON" &&
        git -C "$SCRIPT_DIR" commit -q -m "OTA: $DEVICE $FLAVOR $ver ($date)" &&
        git -C "$SCRIPT_DIR" push -q origin aox; then
         echo "OTA manifest published: $OUT_JSON"

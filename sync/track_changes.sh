@@ -29,6 +29,7 @@ TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="${LOG_DIR}/sync_${TS}.log"
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 if [[ -t 1 ]]; then
   C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RED=$'\e[31m'; C_CYAN=$'\e[36m'
@@ -65,7 +66,7 @@ USAGE:
 COMMANDS:
   ${C_GREEN}--device${C_RESET} <name>
         Symlink .repo/local_manifests/local_manifest.xml to
-        ${SCRIPT_DIR}/local_manifests/<name>.xml, then continue with
+        ${REPO_ROOT}/local_manifests/<name>.xml, then continue with
         whatever command follows (or just switch, if none does). Run
         from the ROM root (needs .repo/).
 
@@ -669,7 +670,7 @@ KSUN_CERT_SHA256="79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821b
 BRAVE_REPO="brave/brave-browser"
 COMMON_DIR="device/oneplus/sm8350-common"
 KERNEL_KBUILD="kernel/oneplus/sm8350/drivers/kernelsu/Kbuild"
-APK_HELPER="${SCRIPT_DIR}/prebuilt_apk.py"
+APK_HELPER="${REPO_ROOT}/build/prebuilt_apk.py"
 
 gh_json() { curl -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: reposcan" "https://api.github.com/$1"; }
 
@@ -1393,7 +1394,7 @@ state_pd() {
     echo "${C_YELLOW}==> pixeldrain skipped: no device linked — run '${SCRIPT_NAME} --device <name>' first${C_RESET}" >&2
     return 1
   fi
-  "$SCRIPT_DIR/otauploader.sh" --device "$dev" -pd --sync-state "$@"
+  "$REPO_ROOT/release/otauploader.sh" --device "$dev" -pd --sync-state "$@"
 }
 
 cmd_save_state() {
@@ -1492,9 +1493,9 @@ cmd_restore_state() {
 # --device
 # ---------------------------------------------------------------------
 switch_manifest() {
-  local dev="$1" src="$SCRIPT_DIR/local_manifests/$1.xml"
+  local dev="$1" src="$REPO_ROOT/local_manifests/$1.xml"
   [[ -f "$src" ]] || {
-    echo "${C_RED}no manifest for '$dev' — have: $(cd "$SCRIPT_DIR/local_manifests" && echo *.xml)${C_RESET}" >&2
+    echo "${C_RED}no manifest for '$dev' — have: $(cd "$REPO_ROOT/local_manifests" && echo *.xml)${C_RESET}" >&2
     exit 2
   }
   [[ -d .repo ]] || {

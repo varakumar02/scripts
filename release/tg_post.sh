@@ -234,8 +234,16 @@ print(json.dumps({"inline_keyboard":kb}))' "$BTN_LABEL" "$URL" "$ROW2" "$CHANGEL
 # Banner goes out as a photo with the message as its caption (1024-char limit,
 # so longer messages fall back to plain text). tg_banner.png is a 1920px copy of
 # axion.png: sendPhoto rejects files over 10 MB.
+#
+# Telegram counts the caption as the parsed text in UTF-16 code units -- HTML tags
+# and &entities do not count. ${#MSG} counts the raw bytes incl. every tag, which
+# for the longer lemonadep/BETA caption crossed 1024 (~1029) and silently dropped
+# the photo, though the real text is ~937. Measure it the way Telegram does.
 BANNER="$SCRIPT_DIR/tg_banner.png"
-if [[ -f $BANNER && ${#MSG} -le 1024 ]]; then
+CAPLEN=$(python3 -c 'import sys,re,html
+s=html.unescape(re.sub(r"<[^>]+>","",sys.stdin.read()))
+print(len(s.encode("utf-16-le"))//2)' <<<"$MSG")
+if [[ -f $BANNER && $CAPLEN -le 1024 ]]; then
     RES=$(tg sendPhoto --form-string "chat_id=$TG_CHAT_ID" -F "photo=@$BANNER" --form-string "caption=$MSG" --form-string parse_mode=HTML "${EXTRA[@]}") || true
 else
     RES=$(tg sendMessage --form-string "chat_id=$TG_CHAT_ID" --form-string "text=$MSG" \

@@ -669,7 +669,7 @@ KSUN_REPO="KernelSU-Next/KernelSU-Next"
 KSUN_CERT_SHA256="79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7"
 BRAVE_REPO="brave/brave-browser"
 COMMON_DIR="device/oneplus/sm8350-common"
-KERNEL_KBUILD="kernel/oneplus/sm8350/drivers/kernelsu/Kbuild"
+KERNEL_KBUILD="kernel/oneplus/sm8350/drivers/staging/ksu-next/Kbuild"
 APK_HELPER="${REPO_ROOT}/build/prebuilt_apk.py"
 
 gh_json() { curl -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: reposcan" "https://api.github.com/$1"; }

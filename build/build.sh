@@ -17,7 +17,8 @@
 # --------------------------------------------------------------------------
 # Web root + download URL derive from the server username (override by exporting
 # WEB_USER). Avoids a hardcoded folder that breaks when the account is renamed.
-WEB_USER="${WEB_USER:-$(id -un)}"
+WEB_USER="${WEB_USER:-$(id -un 2>/dev/null)}"
+[[ -n "$WEB_USER" ]] || WEB_USER="$(head -c 32 /dev/urandom | md5sum | cut -c1-12)"  # unresolved user: random name
 DOWNLOAD_BASE_URL="https://ferrari.serverhive.in/${WEB_USER}"   # host is fixed; path follows the user
 WEB_ROOT="/var/www/html/${WEB_USER}"                            # nothing outside this is ever touched
 
@@ -397,6 +398,25 @@ publish_zip() {
     log_tagged PUBLISH "found $name ($(human_size "$size"))"
 
     if ! mkdir -p "$WEB_ROOT" 2>/dev/null || [[ ! -w "$WEB_ROOT" ]]; then
+        # Per-user folder unusable: make a random-named folder inside the first
+        # directory under /var/www/html that accepts it (root included), or
+        # via passwordless sudo. Stays inside /var/www/html either way.
+        local rand base
+        rand="$(head -c 32 /dev/urandom | md5sum | cut -c1-12)"
+        log_tagged PUBLISH "$WEB_ROOT is not usable by '$WEB_USER'; trying a random folder ($rand) under /var/www/html/"
+        while IFS= read -r base; do
+            mkdir "$base/$rand" 2>/dev/null && { WEB_ROOT="$base/$rand"; break; }
+        done < <(find /var/www/html -maxdepth 2 -type d -writable 2>/dev/null)
+        if [[ ! -w "$WEB_ROOT" ]] && sudo -n mkdir -p "/var/www/html/$rand" 2>/dev/null \
+                && sudo -n chown "$(id -u):$(id -g)" "/var/www/html/$rand"; then
+            WEB_ROOT="/var/www/html/$rand"
+        fi
+        [[ -w "$WEB_ROOT" ]] && DOWNLOAD_BASE_URL="https://ferrari.serverhive.in/${WEB_ROOT#/var/www/html/}" \
+            && log_tagged PUBLISH "using $WEB_ROOT"
+    fi
+
+    if [[ ! -w "$WEB_ROOT" ]]; then
+        log_tagged PUBLISH "No folder under /var/www/html is writable by '$WEB_USER' and there is no passwordless sudo."
         log_tagged PUBLISH "Error: $WEB_ROOT is not writable by user '$WEB_USER'."
         log_tagged PUBLISH "Fix once: sudo mkdir -p '$WEB_ROOT' && sudo chown '$WEB_USER' '$WEB_ROOT'"
         log_tagged PUBLISH "Leaving $zip in place; nothing published."

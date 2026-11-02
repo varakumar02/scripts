@@ -66,6 +66,7 @@ def post_device(text):
 
 # The whole reply to any wrong command: one of these, at random.
 MEH = ("😑", "👍", "😒", "😫", "😩", "🫨", "😬", "🥱", "🫪", "🥴", "😵\u200d💫", "😵")
+DENIED = "⛔ <b>Access Denied</b>"
 NO_ARGS = {"help", "changelog", "cmds", "status"}
 
 
@@ -243,10 +244,10 @@ class Bot:
         custom = self.reg.cmds.get(name)
         if name in BUILTIN_OWNER or (custom and custom["access"] == "owner"):
             if not owner:
-                return self.meh(chat, mid)
+                return self.say(chat, DENIED, mid)
         elif custom and custom["access"] == "admin":
             if not (owner or self.is_admin(msg)):
-                return self.meh(chat, mid)
+                return self.say(chat, DENIED, mid)
         elif name not in BUILTIN_PUBLIC and not custom:
             # unknown: answer in PM or when aimed at us; a bare /foo in the group may be another bot's
             if addressed or msg["chat"]["type"] == "private":
@@ -280,20 +281,6 @@ class Bot:
     def in_group(self, uid):
         """PMs are answered for members of our group (and the owner); everyone else is ignored."""
         return self.group_status(uid) in ("creator", "administrator", "member", "restricted")
-
-    def reply_by_role(self, chat, mid, msg, everyone, mine):
-        """Group replies are seen by all, so the group only ever gets `everyone`; an admin's or the
-        owner's own list (`mine`, None for members) goes to their PM."""
-        if chat != self.group or mine is None:
-            return self.say(chat, mine or everyone, mid)
-        self.say(chat, everyone, mid)
-        if "sender_chat" in msg:          # anonymous admin: no PM to send to
-            return
-        try:
-            self.api("sendMessage", chat_id=msg["from"]["id"], text=mine, parse_mode="HTML",
-                     disable_web_page_preview="true")
-        except RuntimeError:
-            self.say(chat, f"📬 Your full list is waiting: open @{self.me} in a private chat, press Start, then /help.", mid)
 
     def meh(self, chat, mid, why=None):
         """Wrong command: a random MEH emoji; the owner also gets the reason."""
@@ -424,8 +411,7 @@ class Bot:
 
     def cmd_help(self, chat, mid, rest, owner, msg):
         admin = owner or self.is_admin(msg)
-        self.reply_by_role(chat, mid, msg, self.help_text(False, False),
-                           self.help_text(owner, admin) if admin else None)
+        self.say(chat, self.help_text(owner, admin), mid)
 
     def cmd_builds(self, chat, mid, rest, owner, msg):
         rest = rest.lower()
@@ -457,8 +443,7 @@ class Bot:
 
     def cmd_cmds(self, chat, mid, rest, owner, msg):
         admin = owner or self.is_admin(msg)
-        self.reply_by_role(chat, mid, msg, self.cmds_text(False, False),
-                           self.cmds_text(owner, admin) if admin else None)
+        self.say(chat, self.cmds_text(owner, admin), mid)
 
     # -- built-ins (owner)
 
@@ -519,29 +504,33 @@ def selftest():
         assert r.add("hello", "owner", "echo bye", "cap $1") is None and r.cmds["hello"]["caption"] == "cap $1"
         assert r.add("hello", "owner", "echo bye") is None and "caption" not in r.cmds["hello"]
         assert r.remove("hello") is None and r.remove("hello")
-        # /help and /cmds: each role sees only what it may run; the group only ever sees members' list
+        # /help and /cmds: each role sees exactly what it may run, in the group and in a PM alike
         b = Bot.__new__(Bot)
         b.group, b.me, b.reg, out = -100, "axbot", Registry(os.path.join(d, "h.json")), []
         for n, acc in (("pub", "public"), ("adm", "admin"), ("own", "owner")):
             b.reg.add(n, acc, "true")
         b.say = lambda chat, text, reply=None, pre=False: out.append((chat, text))
-        b.api = lambda method, **kw: out.append((kw["chat_id"], kw["text"]))
-        member, admin_, owner_ = (["/pub"], ["/adm", "/own", "/sh", "/addcmd"]), \
-            (["/pub", "/adm"], ["/own", "/sh", "/addcmd"]), (["/pub", "/adm", "/own", "/sh", "/addcmd"], [])
-        def sees(text, role):
-            only_custom = cmd == b.cmd_cmds                    # /cmds lists custom commands only
-            keep = lambda xs: [x for x in xs if not only_custom or x in ("/pub", "/adm", "/own")]
-            return all(w in text for w in keep(role[0])) and not any(h in text for h in keep(role[1]))
+        roles = ((False, False, {"/pub"}), (False, True, {"/pub", "/adm"}), (True, True, {"/pub", "/adm", "/own"}))
         for cmd in (b.cmd_help, b.cmd_cmds):
-            for owner, admin, role in ((False, False, member), (False, True, admin_), (True, True, owner_)):
+            for owner, admin, sees in roles:
                 b.is_admin = lambda msg, a=admin: a
-                out.clear()                                    # in the group
-                cmd(-100, 1, "", owner, {"from": {"id": 5}})
-                assert out[0][0] == -100 and sees(out[0][1], member), out
-                assert len(out) == (2 if admin else 1) and (not admin or (out[1][0] == 5 and sees(out[1][1], role))), out
-                out.clear()                                    # in their PM
-                cmd(5, 1, "", owner, {"from": {"id": 5}})
-                assert len(out) == 1 and out[0][0] == 5 and sees(out[0][1], role), out
+                for chat in (-100, 5):
+                    out.clear()
+                    cmd(chat, 1, "", owner, {"from": {"id": 5}})
+                    assert len(out) == 1 and out[0][0] == chat, out
+                    assert {c for c in ("/pub", "/adm", "/own") if c in out[0][1]} == sees, out
+                    assert ("/sh" in out[0][1]) == (owner and cmd == b.cmd_help), out
+        # denied vs unknown, through handle()
+        b.owner, b.reg.cmds["own"]["cmd"] = 7, "true"
+        b.is_admin = lambda msg: msg["from"]["id"] == 6
+        b.meh = lambda chat, mid, why=None: out.append((chat, "MEH"))
+        for uid, text, want in ((5, "/sh ls", DENIED), (5, "/own", DENIED), (5, "/adm", DENIED), (6, "/own", DENIED),
+                                (6, "/addcmd x public y", DENIED), (5, "/nope@axbot", "MEH"), (5, "/builds x", "MEH"),
+                                (5, "/help me", "MEH")):
+            out.clear()
+            b.handle({"message": {"message_id": 1, "chat": {"id": -100, "type": "supergroup"},
+                                  "from": {"id": uid}, "text": text}})
+            assert out == [(-100, want)], (text, out)
         # admin = admin of our group only
         b = Bot.__new__(Bot)
         b.group, status = -100, {}

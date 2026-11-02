@@ -1,0 +1,14 @@
+[Unit]
+Description=axbot Telegram bot (AxionOS OP9)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=jarvis
+WorkingDirectory=/home/jarvis/scripts
+ExecStart=/usr/bin/python3 -u /home/jarvis/scripts/bot/axbot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -68,6 +68,8 @@ def post_device(text):
 # The whole reply to any wrong command: one of these, at random.
 MEH = ("😑", "👍", "😒", "😫", "😩", "🫨", "😬", "🥱", "🫪", "🥴", "😵\u200d💫", "😵")
 DENIED = "⛔ <b>Access Denied</b>"
+OFFLINE = "😴 I was offline when you sent this, here you go:"
+STALE_AFTER = 120     # seconds; an older command was queued by Telegram while the bot was down
 NO_ARGS = {"help", "changelog", "cmds", "status"}
 
 
@@ -259,6 +261,10 @@ class Bot:
         print(f"chat {chat} from {msg.get('from', {}).get('id')}{' (owner)' if owner else ''}: /{name}", flush=True)
         mid = msg["message_id"]
         custom = self.reg.cmds.get(name)
+        # sent while the bot was down (Telegram queues updates for 24 h): say so before the late answer
+        will_answer = name in BUILTIN_OWNER | BUILTIN_PUBLIC or custom or addressed or private
+        if will_answer and time.time() - msg.get("date", time.time()) > STALE_AFTER:
+            self.say(chat, OFFLINE, mid)
         if name in BUILTIN_OWNER or (custom and custom["access"] == "owner"):
             if not owner:
                 return self.say(chat, DENIED, mid)
@@ -600,6 +606,16 @@ def selftest():
             b.handle({"message": {"message_id": 43, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": uid},
                                   "text": "/setbuild", **extra}})
         assert out == [(-100, DENIED), (-100, "MEH"), (-100, "MEH")] and b.latest == {"lemonade": [40], "lemonadep": [30]}, out
+        # a command older than STALE_AFTER gets the offline note first; a fresh one, or one the bot
+        # would not answer (bare unknown /foo in the group), does not
+        b.api = lambda method, **kw: None
+        for age, text, want in ((600, "/help", [OFFLINE, "x"]), (5, "/help", ["x"]), (600, "/foo", [])):
+            out.clear()
+            b.cmd_help = lambda chat, mid, rest, owner, msg: out.append((chat, "x"))
+            b.handle({"message": {"message_id": 1, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 5},
+                                  "date": int(time.time()) - age, "text": text}})
+            assert [t for _, t in out] == want, (age, text, out)
+        del b.cmd_help
         # history: newest first, max KEEP_POSTS, re-adding moves to front; deleted posts fall through
         for i in (41, 42, 43, 41):
             b.remember({"message_id": i, "text": "#lemonade"})

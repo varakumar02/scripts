@@ -432,7 +432,7 @@ class Bot:
             shutil.rmtree(out, ignore_errors=True)
 
     def run_custom(self, chat, mid, name, cmd, args, who):
-        """Custom command: only $OUT is posted, never the output. $OUT/tg_message.txt (HTML) is the post
+        """Custom command: $OUT is posted; the output only in a PM (the owner's), never in the group. $OUT/tg_message.txt (HTML) is the post
         text, else the /addcmd "## ..." template expanded now; the other files go out with it, and with
         no other file the text is posted alone. Any failure -> "Failed to retrieve" in the chat, full
         log as a file to the owner's PM."""
@@ -470,6 +470,8 @@ class Bot:
                 problem = f"posting failed: {e}"
         if not big:
             shutil.rmtree(out, ignore_errors=True)
+        if chat != self.group:                      # PM: the owner also sees what the command printed
+            self.say(chat, text, mid, pre=True)
         if not problem:
             return
         self.say(chat, "Failed to retrieve", mid)
@@ -865,7 +867,7 @@ def selftest():
         global RUNS, LOGS
         RUNS, LOGS = os.path.join(d, "runs"), os.path.join(d, "logs")
         b = Bot.__new__(Bot)
-        b.owner, calls = 7, []
+        b.owner, b.group, calls = 7, -100, []
 
         def api(method, files=None, **kw):
             if kw.get("parse_mode") and "<bad" in (kw.get("text") or kw.get("caption") or ""):
@@ -878,6 +880,9 @@ def selftest():
         mk = 'echo noise; echo "$1" > "$OUT/r.txt"'
         b.run_custom(-100, 1, "t", {"cmd": mk, "caption": "for $1: $(ls) \"q\""}, ["$(id)"], "u")
         assert calls == [("sendDocument", -100, "r.txt", "$(id)\n", 'for $(id): r.txt "q"', "Markdown")], calls
+        calls.clear()     # in a PM the printed output follows the files
+        b.run_custom(7, 1, "t", {"cmd": mk}, ["x"], "u")
+        assert [c[0] for c in calls] == ["sendDocument", "say"] and "noise" in calls[1][2], calls
         calls.clear()     # $OUT/tg_message.txt wins over the template and is not uploaded itself
         b.run_custom(-100, 1, "t", {"cmd": mk + '; echo "<b>made $1</b>" > tg_message.txt', "caption": "tmpl"}, ["x"], "u")
         assert calls == [("sendDocument", -100, "r.txt", "x\n", "<b>made x</b>", "HTML")] and not os.listdir(RUNS), calls

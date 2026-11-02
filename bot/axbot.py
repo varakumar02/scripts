@@ -21,6 +21,7 @@ import urllib.error, urllib.parse, urllib.request
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.expanduser("~/.config/axbot/commands.json")
 LATEST = os.path.expanduser("~/.config/axbot/latest.json")
+BUGS = os.path.expanduser("~/.config/axbot/bugs.json")
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
 LOGS = os.path.expanduser("~/.cache/axbot/logs")
 RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
@@ -28,8 +29,8 @@ KEEP_POSTS = 3        # release posts remembered per device, so a deleted one fa
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update"}
-BUILTIN_PUBLIC = {"start", "help", "builds", "changelog", "cmds"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve", "reopen"}
+BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
@@ -70,7 +71,7 @@ MEH = ("😑", "👍", "😒", "😫", "😩", "🫨", "😬", "🥱", "🫪", "
 DENIED = "⛔ <b>Access Denied</b>"
 OFFLINE = "😴 I was offline when you sent this, here you go:"
 STALE_AFTER = 120     # seconds; an older command was queued by Telegram while the bot was down
-NO_ARGS = {"help", "changelog", "cmds", "status"}
+NO_ARGS = {"notes", "changelog", "cmds", "status", "ping"}
 
 
 def tg_len(text):
@@ -132,12 +133,64 @@ class Registry:
 
 # ---- Telegram ----------------------------------------------------------------
 
+class BugBook:
+    """Bug reports: {"next": id, "bugs": [{id, text, by, chat, msg, date, resolved}]}, oldest first."""
+
+    def __init__(self, path):
+        self.path = path
+        try:
+            self.d = json.load(open(path))
+        except (FileNotFoundError, ValueError):
+            self.d = {"next": 1, "bugs": []}
+
+    def save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        json.dump(self.d, open(self.path + ".tmp", "w"), indent=1)
+        os.replace(self.path + ".tmp", self.path)
+
+    def add(self, text, by, chat, msg):
+        b = {"id": self.d["next"], "text": text, "by": by, "chat": chat, "msg": msg,
+             "date": int(time.time()), "resolved": None}
+        self.d["next"] += 1
+        self.d["bugs"].append(b)
+        self.save()
+        return b
+
+    def get(self, i):
+        return next((b for b in self.d["bugs"] if b["id"] == i), None)
+
+    def listed(self, resolved):
+        return [b for b in self.d["bugs"] if resolved or not b["resolved"]]
+
+    def set_resolved(self, ids, on):
+        """-> (changed bugs, [ids that were unknown or already in that state])"""
+        changed, skipped = [], []
+        for i in ids:
+            b = self.get(i)
+            if not b or bool(b["resolved"]) == on:
+                skipped.append(i)
+                continue
+            b["resolved"] = int(time.time()) if on else None
+            changed.append(b)
+        if changed:
+            self.save()
+        return changed, skipped
+
+
+def bug_ids(rest):
+    """'3 #5, 7' -> [3, 5, 7]; None if anything else is in there."""
+    toks = [t.lstrip("#") for t in re.split(r"[\s,]+", rest) if t]
+    return [int(t) for t in toks] if toks and all(t.isdigit() for t in toks) else None
+
+
 class Bot:
     def __init__(self, env):
         self.token = env["TG_BOT_TOKEN"]
         self.group = int(env["TG_CHAT_ID"])
         self.owner = int(env.get("TG_OWNER_ID") or 0)
         self.reg = Registry(STATE)
+        self.bugs = BugBook(BUGS)
+        self.started = time.time()
         try:
             self.latest = json.load(open(LATEST))
         except (FileNotFoundError, ValueError):
@@ -252,7 +305,7 @@ class Bot:
         for m in msg.get("new_chat_members", []):
             if not m.get("is_bot"):
                 self.say(chat, f"Welcome, {html.escape(m.get('first_name', ''))}! "
-                               "Newest builds: /builds · commands: /help")
+                               "Newest builds: /builds · commands: /notes · found a bug? /bug")
         parsed = parse_command(msg.get("text"), self.me)
         if not parsed:
             return
@@ -412,13 +465,15 @@ class Bot:
     # -- built-ins (public)
 
     def cmd_start(self, chat, mid, rest, owner, msg):
-        self.cmd_help(chat, mid, rest, owner, msg)
+        self.cmd_notes(chat, mid, rest, owner, msg)
 
-    def help_text(self, owner, admin):
+    def notes_text(self, owner, admin):
         """Members: one plain list. Admins: Everyone + Admins sections. Owner (PM only): + Owner."""
         custom = lambda access: [f"/{n}" for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
-        everyone = ["/help – this list", "/builds [lemonade|lemonadep] – newest release post",
-                    "/changelog – changelog", "/cmds – custom commands", *custom("public")]
+        everyone = ["/notes – this list", "/builds [lemonade|lemonadep] – newest release post",
+                    "/changelog – changelog", "/bug &lt;what's wrong&gt; – report a bug (or reply /bug to a message)",
+                    "/bugs – open bugs · /bugs &lt;id&gt; – one bug in full", "/ping – is the bot up?",
+                    "/cmds – custom commands", *custom("public")]
         if not admin:
             return "\n".join(everyone)
         lines = ["👥 <b>Everyone</b>", *everyone, "", "🛡 <b>Admins</b>", *(custom("admin") or ["(no admin commands yet)"])]
@@ -430,6 +485,8 @@ class Bot:
                       "/post! [args] – tg_post.sh, send for real",
                       "/setbuild [device] – reply to a release post: /builds shows it",
                       "/update – pull the newest bot code, self-test, restart",
+                      "/bugs all – open and resolved bugs",
+                      "/resolve &lt;id…&gt; – mark bugs resolved, tells the reporter · /reopen &lt;id…&gt; – undo",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption]",
                       "    files the command leaves in $OUT are posted, its output never",
                       "    text: $OUT/tg_message.txt (HTML or *Markdown*), else the ## caption ($1, $(date)… per run)",
@@ -437,10 +494,10 @@ class Bot:
                       *custom("owner")]
         return "\n".join(lines)
 
-    def cmd_help(self, chat, mid, rest, owner, msg):
+    def cmd_notes(self, chat, mid, rest, owner, msg):
         # in the group the owner gets the admin view; the full list only in the owner's PM
         full = owner and chat != self.group
-        self.say(chat, self.help_text(full, owner or self.is_admin(msg)), mid)
+        self.say(chat, self.notes_text(full, owner or self.is_admin(msg)), mid)
 
     def cmd_builds(self, chat, mid, rest, owner, msg):
         rest = rest.lower()
@@ -471,6 +528,52 @@ class Bot:
         if ids != self.latest.get(dev, []):
             self.save_posts(dev, ids)
         return bool(ids)
+
+    def cmd_ping(self, chat, mid, rest, owner, msg):
+        up = int(time.time() - self.started)
+        self.say(chat, f"🟢 Up {up // 86400}d {up % 86400 // 3600}h {up % 3600 // 60}m", mid)
+
+    def cmd_bug(self, chat, mid, rest, owner, msg):
+        reply = msg.get("reply_to_message") or {}
+        text = rest or reply.get("text") or reply.get("caption") or ""
+        if not text.strip():
+            return self.meh(chat, mid, "usage: /bug <what's wrong>, or reply /bug to a message")
+        f = msg.get("from", {})
+        by = "@" + f["username"] if f.get("username") else f.get("first_name", "someone")
+        b = self.bugs.add(text.strip()[:1000], by, chat, mid)
+        self.say(chat, f"🐞 Logged as bug <b>#{b['id']}</b>. Thanks!", mid)
+
+    def bug_line(self, b, full=False):
+        text = b["text"] if full else (b["text"][:80] + "…" if len(b["text"]) > 80 else b["text"])
+        mark = "✅" if b["resolved"] else "🐞"
+        return f"{mark} <b>#{b['id']}</b> {html.escape(text)} — {html.escape(b['by'])}"
+
+    def cmd_bugs(self, chat, mid, rest, owner, msg):
+        if rest.lower() == "all":
+            if not owner:
+                return self.say(chat, DENIED, mid)
+            bugs, title = self.bugs.listed(True), "All bugs"
+        elif rest:
+            ids = bug_ids(rest)
+            b = ids and len(ids) == 1 and self.bugs.get(ids[0])
+            if not b:
+                return self.meh(chat, mid, "no such bug")
+            when = time.strftime("%Y-%m-%d", time.gmtime(b["date"]))
+            state = f"resolved {time.strftime('%Y-%m-%d', time.gmtime(b['resolved']))}" if b["resolved"] else "open"
+            return self.say(chat, f"{self.bug_line(b, True)}\n<i>reported {when} · {state}</i>", mid)
+        else:
+            bugs, title = self.bugs.listed(False), "Open bugs"
+        if not bugs:
+            return self.say(chat, "🎉 No open bugs." if title == "Open bugs" else "No bugs reported yet.", mid)
+        lines = [self.bug_line(b) for b in reversed(bugs)]           # newest first
+        text, shown = f"<b>{title}</b> ({len(bugs)})\n", 0
+        for line in lines:                                          # stay under Telegram's 4096
+            if len(text) + len(line) > 3900:
+                break
+            text, shown = text + line + "\n", shown + 1
+        if shown < len(lines):
+            text += f"…and {len(lines) - shown} older"
+        self.say(chat, text, mid)
 
     def cmd_changelog(self, chat, mid, rest, owner, msg):
         try:
@@ -547,13 +650,29 @@ class Bot:
         self.api("getUpdates", offset=self.offset, timeout=0)    # confirm this /update, or it runs again
         os._exit(0)
 
+    def cmd_resolve(self, chat, mid, rest, owner, msg, on=True):
+        ids = bug_ids(rest)
+        if not ids:
+            return self.meh(chat, mid, f"usage: /{'resolve' if on else 'reopen'} <id> [id…]")
+        changed, skipped = self.bugs.set_resolved(ids, on)
+        for b in changed if on else []:                             # tell the reporter, under their report
+            self.say(b["chat"], f"✅ Bug <b>#{b['id']}</b> is resolved.", b["msg"])
+        out = (f"{'✅ Resolved' if on else '🐞 Reopened'}: " + ", ".join(f"#{b['id']}" for b in changed)) if changed else ""
+        if skipped:
+            out += ("\n" if out else "") + "😬 skipped (unknown or already " + ("resolved" if on else "open") + "): " \
+                   + ", ".join(f"#{i}" for i in skipped)
+        self.say(chat, out, mid)
+
+    def cmd_reopen(self, chat, mid, rest, owner, msg):
+        self.cmd_resolve(chat, mid, rest, owner, msg, on=False)
+
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
         self.meh(chat, mid, err) if err else self.say(chat, f"removed /{rest}", mid)
 
 
 def selftest():
-    assert parse_command("/help", "axbot") == ("help", "", False)
+    assert parse_command("/notes", "axbot") == ("notes", "", False)
     assert parse_command("/builds\nlemonade", "axbot") == ("builds", "lemonade", False)
     assert parse_command("/", "axbot") == ("", "", False) and parse_command("/@axbot", "axbot") == ("", "", True)
     assert parse_mode_for("*Status:* ok") == "Markdown" and parse_mode_for("<b>x</b> 1 < 2") == "HTML"
@@ -582,7 +701,7 @@ def selftest():
         assert r.add("hello", "owner", "echo bye", "cap $1") is None and r.cmds["hello"]["caption"] == "cap $1"
         assert r.add("hello", "owner", "echo bye") is None and "caption" not in r.cmds["hello"]
         assert r.remove("hello") is None and r.remove("hello")
-        # /help and /cmds: each role sees exactly what it may run, in the group and in a PM alike
+        # /notes and /cmds: each role sees exactly what it may run, in the group and in a PM alike
         b = Bot.__new__(Bot)
         b.group, b.me, b.reg, out = -100, "axbot", Registry(os.path.join(d, "h.json")), []
         for n, acc in (("pub", "public"), ("adm", "admin"), ("own", "owner")):
@@ -591,23 +710,23 @@ def selftest():
         # (owner, admin, chat) -> what the reply may name; the owner's PM is the only full list
         cases = ((False, False, -100, {"/pub"}), (False, True, -100, {"/pub", "/adm"}),
                  (True, True, -100, {"/pub", "/adm"}), (True, True, 7, {"/pub", "/adm", "/own"}))
-        for cmd in (b.cmd_help, b.cmd_cmds):
+        for cmd in (b.cmd_notes, b.cmd_cmds):
             for owner, admin, chat, sees in cases:
                 b.is_admin = lambda msg, a=admin: a
                 out.clear()
                 cmd(chat, 1, "", owner, {"from": {"id": 5}})
                 assert len(out) == 1 and out[0][0] == chat, out
                 assert {c for c in ("/pub", "/adm", "/own") if c in out[0][1]} == sees, (owner, chat, out)
-                assert ("/sh" in out[0][1]) == (chat == 7 and cmd == b.cmd_help), out
+                assert ("/sh" in out[0][1]) == (chat == 7 and cmd == b.cmd_notes), out
                 assert ("<code>" in out[0][1]) == (chat == 7 and cmd == b.cmd_cmds), out
-                assert ("Admins" in out[0][1]) == (admin and cmd == b.cmd_help), out
+                assert ("Admins" in out[0][1]) == (admin and cmd == b.cmd_notes), out
         # denied vs unknown, through handle()
         b.owner, b.reg.cmds["own"]["cmd"] = 7, "true"
         b.is_admin = lambda msg: msg["from"]["id"] == 6
         b.meh = lambda chat, mid, why=None: out.append((chat, "MEH"))
         for uid, text, want in ((5, "/update", DENIED), (6, "/update", DENIED), (5, "/sh ls", DENIED), (5, "/own", DENIED), (5, "/adm", DENIED), (6, "/own", DENIED),
                                 (6, "/addcmd x public y", DENIED), (5, "/nope@axbot", "MEH"), (5, "/builds x", "MEH"),
-                                (5, "/help me", "MEH")):
+                                (5, "/notes me", "MEH")):
             out.clear()
             b.handle({"message": {"message_id": 1, "chat": {"id": -100, "type": "supergroup"},
                                   "from": {"id": uid}, "text": text}})
@@ -632,13 +751,38 @@ def selftest():
         # a command older than STALE_AFTER gets the offline note first; a fresh one, or one the bot
         # would not answer (bare unknown /foo in the group), does not
         b.api = lambda method, **kw: None
-        for age, text, want in ((600, "/help", [OFFLINE, "x"]), (5, "/help", ["x"]), (600, "/foo", [])):
+        for age, text, want in ((600, "/notes", [OFFLINE, "x"]), (5, "/notes", ["x"]), (600, "/foo", [])):
             out.clear()
-            b.cmd_help = lambda chat, mid, rest, owner, msg: out.append((chat, "x"))
+            b.cmd_notes = lambda chat, mid, rest, owner, msg: out.append((chat, "x"))
             b.handle({"message": {"message_id": 1, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 5},
                                   "date": int(time.time()) - age, "text": text}})
             assert [t for _, t in out] == want, (age, text, out)
-        del b.cmd_help
+        del b.cmd_notes
+        # bugs: file, list, one in full, owner-only all/resolve/reopen, reporter told on resolve
+        global BUGS
+        BUGS = os.path.join(d, "bugs.json")
+        b.bugs, b.meh = BugBook(BUGS), lambda chat, mid, why=None: out.append((chat, "MEH"))
+        def send(uid, text, mid=1, chat=-100, **extra):
+            out.clear()
+            b.handle({"message": {"message_id": mid, "chat": {"id": chat, "type": "supergroup" if chat < 0 else "private"},
+                                  "from": {"id": uid, "username": f"u{uid}"}, "text": text, **extra}})
+            return [t for _, t in out]
+        assert send(5, "/bug camera <b>crash</b>", 10) == ["🐞 Logged as bug <b>#1</b>. Thanks!"]
+        assert send(6, "/bug", 11, reply_to_message={"message_id": 9, "text": "wifi drops"})[0].endswith("#2</b>. Thanks!")
+        assert send(5, "/bug") == ["MEH"] and send(5, "/bug   ") == ["MEH"]
+        o = send(5, "/bugs")[0]
+        assert "#2</b> wifi drops — @u6" in o and "camera &lt;b&gt;crash" in o and o.index("#2") < o.index("#1"), o
+        assert send(5, "/bugs all") == [DENIED] and send(5, "/resolve 1") == [DENIED] and send(6, "/reopen 1") == [DENIED]
+        o = send(7, "/resolve #1, 9 1")
+        assert o[0] == "✅ Bug <b>#1</b> is resolved." and out[0][0] == -100 and "Resolved: #1" in o[1] and "#9" in o[1], o
+        assert "#1" not in send(5, "/bugs")[0] and "#1" in send(7, "/bugs all")[0]
+        assert "resolved" in send(5, "/bugs 1")[0] and send(5, "/bugs 99") == ["MEH"] and send(5, "/bugs x y") == ["MEH"]
+        assert "Reopened: #1" in send(7, "/reopen 1")[0] and "#1" in send(5, "/bugs")[0]
+        assert send(7, "/resolve") == ["MEH"] and send(7, "/resolve one") == ["MEH"]
+        assert BugBook(BUGS).d["next"] == 3 and bug_ids("3 #5,7") == [3, 5, 7] and bug_ids("3 x") is None
+        b.started = time.time() - 90061
+        assert send(5, "/ping") == ["🟢 Up 1d 1h 1m"] and send(5, "/ping x") == ["MEH"]
+        assert send(5, "/help") == []           # renamed to /notes; bare unknown in the group stays quiet
         # history: newest first, max KEEP_POSTS, re-adding moves to front; deleted posts fall through
         for i in (41, 42, 43, 41):
             b.remember({"message_id": i, "text": "#lemonade"})
@@ -659,7 +803,7 @@ def selftest():
         # PMs: owner only, anyone else ignored without a reply
         out.clear()
         b.api = lambda method, **kw: out.append((method, kw.get("chat_id")))
-        b.handle({"message": {"message_id": 1, "chat": {"id": 5, "type": "private"}, "from": {"id": 5}, "text": "/help"}})
+        b.handle({"message": {"message_id": 1, "chat": {"id": 5, "type": "private"}, "from": {"id": 5}, "text": "/notes"}})
         assert out == [], out
         # admin = admin of our group only
         b = Bot.__new__(Bot)

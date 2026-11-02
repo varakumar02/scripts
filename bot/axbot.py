@@ -15,7 +15,7 @@ fresh directory in $OUT (also the cwd); files left there are sent back.
   python3 bot/axbot.py             # run
   python3 bot/axbot.py --selftest  # checks for the parsing/permission logic
 """
-import html, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid
+import base64, html, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid
 import urllib.error, urllib.parse, urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,12 +25,14 @@ BUGS = os.path.expanduser("~/.config/axbot/bugs.json")
 RESTARTED = os.path.expanduser("~/.config/axbot/restarted.json")   # set by /update, read once at start
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
 LOGS = os.path.expanduser("~/.cache/axbot/logs")
+PD_API = "https://pixeldrain.com/api/"
+PD_FOLDER = "Axion"         # the release folder otauploader.sh uploads into, under /me
 RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
 KEEP_POSTS = 3        # release posts remembered per device, so a deleted one falls back to the previous
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve", "storage"}
 BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs", "editbug"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
@@ -76,7 +78,7 @@ EDITBUG_USAGE = ("✏️ <b>How to edit a bug</b>\n"
                  "Bug numbers are in /bugs.")
 OFFLINE = "😴 I was offline when you sent this, here you go:"
 STALE_AFTER = 120     # seconds; an older command was queued by Telegram while the bot was down
-NO_ARGS = {"notes", "changelog", "cmds", "status", "ping"}
+NO_ARGS = {"notes", "changelog", "cmds", "status", "ping", "storage"}
 
 
 def tg_len(text):
@@ -188,6 +190,15 @@ def dump_json(path, data):
     os.replace(path + ".tmp", path)
 
 
+def size(n):
+    """Decimal units, as pixeldrain shows them."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1000:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.2f} {unit}"
+        n /= 1000
+    return f"{n:.2f} TB"
+
+
 def bug_ids(rest):
     """'3 #5, 7' -> [3, 5, 7]; None if anything else is in there."""
     toks = [t.lstrip("#") for t in re.split(r"[\s,]+", rest) if t]
@@ -211,6 +222,7 @@ class Bot:
         self.last_pin = None
         self.me = self.api("getMe")["username"]
         self.title = self.api("getChat", chat_id=self.group).get("title", "the group")
+        self.pd_key = env.get("PIXELDRAIN_API_KEY", "")
 
     def api(self, method, files=None, http_timeout=60, **params):
         url = f"https://api.telegram.org/bot{self.token}/{method}"
@@ -505,7 +517,7 @@ class Bot:
             lines += ["", "[Admin only]", *block(custom("admin"))]
         if owner:
             lines += ["", "[Owner only]", *block(["status", "sh", "post", "post!", "setbuild", "update", "bugs all",
-                                                  "resolve", "addcmd", "delcmd", *custom("owner")])]
+                                                  "resolve", "storage", "addcmd", "delcmd", *custom("owner")])]
         return "\n".join(lines + ["", "You can run these by tapping them, or by typing /command"])
 
     def cmd_notes(self, chat, mid, rest, owner, msg):
@@ -687,6 +699,43 @@ class Bot:
             out += ("\n" if out else "") + "⚠️ Skipped, no open bug: " + ", ".join(f"#{i}" for i in skipped)
         self.say(chat, out, mid)
 
+    def pd_get(self, path):
+        auth = "Basic " + base64.b64encode((":" + self.pd_key).encode()).decode()
+        req = urllib.request.Request(PD_API + urllib.parse.quote(path, safe="/?=&"), headers={"Authorization": auth})
+        return json.load(urllib.request.urlopen(req, timeout=30))
+
+    def folder_size(self, path):
+        """-> (bytes, files) under path; pixeldrain stores no directory totals. Only ?stat, never a download."""
+        total = files = 0
+        for c in self.pd_get(f"filesystem/{path}?stat").get("children", []):
+            if c["type"] == "dir":
+                t, f = self.folder_size(c["path"].lstrip("/"))
+                total, files = total + t, files + f
+            else:
+                total, files = total + c["file_size"], files + 1
+        return total, files
+
+    def cmd_storage(self, chat, mid, rest, owner, msg):
+        if not self.pd_key:
+            return self.meh(chat, mid, "PIXELDRAIN_API_KEY is not set in .env")
+        threading.Thread(target=self.storage_report, args=(chat, mid), daemon=True).start()
+
+    def storage_report(self, chat, mid):
+        try:
+            u = self.pd_get("user")
+            used, files = self.folder_size("me/" + PD_FOLDER)
+        except Exception as e:
+            return self.meh(chat, mid, f"pixeldrain: {e}")
+        sub = u["subscription"]
+        fs_used, fs_cap = u["filesystem_storage_used"], sub["filesystem_storage_limit"]
+        tx_used, tx_cap = u["monthly_transfer_used"], sub["monthly_transfer_cap"]
+        self.say(chat, "\n".join([
+            f"💾 <b>Pixeldrain</b> · {html.escape(sub['name'])}",
+            f"{PD_FOLDER} folder: <b>{size(used)}</b> · {files} files",
+            f"Storage: {size(fs_used)} of {size(fs_cap)} · <b>{size(fs_cap - fs_used)} left</b>",
+            f"Bandwidth this month: {size(tx_used)} of {size(tx_cap)} · <b>{size(tx_cap - tx_used)} left</b>",
+            "<i>Bandwidth is for the whole account; pixeldrain does not count it per folder.</i>"]), mid)
+
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
         self.meh(chat, mid, err) if err else self.say(chat, f"removed /{rest}", mid)
@@ -825,6 +874,18 @@ def selftest():
         b.api = lambda method, **kw: out.append((kw["chat_id"], kw["text"]))
         b.announce_restart(); b.announce_restart()
         assert len(out) == 1 and out[0][0] == 7 and out[0][1].startswith("🟢 Back up on <code>") and not os.path.exists(RESTARTED), out
+        # /storage: folder total walks subdirectories via ?stat, figures from /api/user
+        assert size(999) == "999 B" and size(31_860_000_000) == "31.86 GB" and size(4e12) == "4.00 TB"
+        tree = {"filesystem/me/Axion?stat": [{"type": "dir", "path": "/me/Axion/lemonade"}, {"type": "file", "file_size": 600}],
+                "filesystem/me/Axion/lemonade?stat": [{"type": "file", "file_size": 2_000_000_000}, {"type": "file", "file_size": 400}]}
+        user = {"subscription": {"name": "Pro", "filesystem_storage_limit": 2_000_000_000_000, "monthly_transfer_cap": 4_000_000_000_000},
+                "filesystem_storage_used": 83_000_000_000, "monthly_transfer_used": 619_000_000_000}
+        b.pd_get = lambda path: user if path == "user" else {"children": tree[path]}
+        assert b.folder_size("me/Axion") == (2_000_001_000, 3)
+        out.clear()
+        b.storage_report(7, 1)
+        assert "Axion folder: <b>2.00 GB</b> · 3 files" in out[0][1] and "<b>1.92 TB left</b>" in out[0][1] \
+            and "<b>3.38 TB left</b>" in out[0][1], out
         # history: newest first, max KEEP_POSTS, re-adding moves to front; deleted posts fall through
         for i in (41, 42, 43, 41):
             b.remember({"message_id": i, "text": "#lemonade"})

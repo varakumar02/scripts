@@ -548,10 +548,11 @@ class Bot:
         f = msg.get("from", {})
         by = "@" + f["username"] if f.get("username") else f.get("first_name", "someone")
         b = self.bugs.add(text.strip()[:1000], by, f.get("id"), chat, mid)
-        self.say(chat, f"🐞 Logged as bug <b>#{b['id']}</b>. Thanks!", mid)
+        self.say(chat, f"🐛 Bug <b>#{b['id']}</b> logged, thanks!", mid)
 
     def bug_line(self, b):
-        return f"{'✅' if b['resolved'] else '🐞'} <b>#{b['id']}</b> {html.escape(b['text'])} — {html.escape(b['by'])}"
+        # emoji only to tell resolved ones apart in /bugs all; open bugs are plain lines
+        return f"{'✅ ' if b['resolved'] else ''}<b>#{b['id']}</b> {html.escape(b['text'])} — <i>{html.escape(b['by'])}</i>"
 
     def cmd_bugs(self, chat, mid, rest, owner, msg):
         if rest.lower() == "all":
@@ -563,9 +564,9 @@ class Bot:
         else:
             bugs, title = self.bugs.listed(False), "Open bugs"
         if not bugs:
-            return self.say(chat, "🎉 No open bugs." if title == "Open bugs" else "No bugs reported yet.", mid)
+            return self.say(chat, "✨ No open bugs." if title == "Open bugs" else "✨ No bugs reported yet.", mid)
         lines = [self.bug_line(b) for b in reversed(bugs)]           # newest first
-        text, shown = f"<b>{title}</b> ({len(bugs)})\n", 0
+        text, shown = f"🐛 <b>{title}</b> · {len(bugs)}\n\n", 0
         for line in lines:                                          # stay under Telegram's 4096
             if len(text) + len(line) > 3900:
                 break
@@ -587,7 +588,7 @@ class Bot:
             return self.say(chat, DENIED, mid)
         b["text"] = text.strip()[:1000]
         self.bugs.save()
-        self.say(chat, f"✏️ Bug <b>#{b['id']}</b> updated:\n{self.bug_line(b)}", mid)
+        self.say(chat, f"✏️ Bug updated\n{self.bug_line(b)}", mid)
 
     def cmd_changelog(self, chat, mid, rest, owner, msg):
         try:
@@ -670,10 +671,10 @@ class Bot:
             return self.meh(chat, mid, "usage: /resolve <id> [id…]")
         changed, skipped = self.bugs.resolve(ids)
         for b in changed:                                           # tell the reporter, under their report
-            self.say(b["chat"], f"✅ Bug <b>#{b['id']}</b> is resolved.", b["msg"])
-        out = ("✅ Resolved: " + ", ".join(f"#{b['id']}" for b in changed)) if changed else ""
+            self.say(b["chat"], f"✅ Bug <b>#{b['id']}</b> resolved", b["msg"])
+        out = ("✅ Resolved " + ", ".join(f"#{b['id']}" for b in changed)) if changed else ""
         if skipped:
-            out += ("\n" if out else "") + "😬 skipped (no open bug with that id): " + ", ".join(f"#{i}" for i in skipped)
+            out += ("\n" if out else "") + "⚠️ Skipped, no open bug: " + ", ".join(f"#{i}" for i in skipped)
         self.say(chat, out, mid)
 
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
@@ -777,23 +778,23 @@ def selftest():
             b.handle({"message": {"message_id": mid, "chat": {"id": chat, "type": "supergroup" if chat < 0 else "private"},
                                   "from": {"id": uid, "username": f"u{uid}"}, "text": text, **extra}})
             return [t for _, t in out]
-        assert send(5, "/bug camera <b>crash</b>", 10) == ["🐞 Logged as bug <b>#1</b>. Thanks!"]
-        assert send(6, "/bug", 11, reply_to_message={"message_id": 9, "text": "wifi drops"})[0].endswith("#2</b>. Thanks!")
+        assert send(5, "/bug camera <b>crash</b>", 10) == ["🐛 Bug <b>#1</b> logged, thanks!"]
+        assert send(6, "/bug", 11, reply_to_message={"message_id": 9, "text": "wifi drops"})[0].startswith("🐛 Bug <b>#2</b>")
         assert send(5, "/bug") == ["MEH"] and send(5, "/bug   ") == ["MEH"]
         o = send(5, "/bugs")[0]
-        assert "#2</b> wifi drops — @u6" in o and "camera &lt;b&gt;crash" in o and o.index("#2") < o.index("#1"), o
+        assert "#2</b> wifi drops — <i>@u6</i>" in o and o.startswith("🐛 <b>Open bugs</b> · 2") and "camera &lt;b&gt;crash" in o and o.index("#2") < o.index("#1"), o
         assert send(5, "/bugs all") == [DENIED] and send(5, "/resolve 1") == [DENIED] and send(5, "/bugs 1") == ["MEH"]
         b.is_admin = lambda msg: msg.get("from", {}).get("id") == 6
-        assert send(5, "/editbug 1 camera crash at 4K60")[0].startswith("✏️ Bug <b>#1</b> updated")
+        assert send(5, "/editbug 1 camera crash at 4K60")[0].startswith("✏️ Bug updated\n<b>#1</b> camera crash at 4K60")
         assert b.bugs.get(1)["text"] == "camera crash at 4K60"
         assert send(6, "/editbug #1", reply_to_message={"message_id": 3, "text": "by admin"})[0].startswith("✏️")
         assert send(8, "/editbug 1 hijack") == [DENIED] and b.bugs.get(1)["text"] == "by admin"
         assert send(5, "/editbug 1") == ["MEH"] and send(5, "/editbug 99 x") == ["MEH"] and send(5, "/editbug x y") == ["MEH"]
         assert send(5, "/reopen 1") == []      # removed
         o = send(7, "/resolve #1, 9 1")
-        assert o[0] == "✅ Bug <b>#1</b> is resolved." and out[0][0] == -100 and "Resolved: #1" in o[1] and "#9" in o[1], o
+        assert o[0] == "✅ Bug <b>#1</b> resolved" and out[0][0] == -100 and "Resolved #1" in o[1] and "#9" in o[1], o
         assert "#1" not in send(5, "/bugs")[0] and "#1" in send(7, "/bugs all")[0]
-        assert "no open bug with that id): #1" in send(7, "/resolve 1")[0]
+        assert "Skipped, no open bug: #1" in send(7, "/resolve 1")[0]
         assert [x["id"] for x in load_json(BUGS, {})["bugs"]] == [2]                 # open file: open only
         assert [x["id"] for x in load_json(BUGS.replace(".json", "-resolved.json"), [])] == [1]
         assert send(5, "/editbug 1 too late") == ["MEH"]                              # resolved: not editable

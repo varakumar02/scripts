@@ -27,7 +27,7 @@ RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "caption"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd"}
 BUILTIN_PUBLIC = {"start", "help", "builds", "changelog", "cmds"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
@@ -98,24 +98,14 @@ class Registry:
         json.dump(self.cmds, open(tmp, "w"), indent=1)
         os.replace(tmp, self.path)
 
-    def add(self, name, access, line):
+    def add(self, name, access, line, caption=""):
         if not NAME_RE.match(name) or name in BUILTIN_OWNER | BUILTIN_PUBLIC:
             return "name must be [a-z0-9_]{1,32} and not a built-in"
         if access not in ("public", "owner"):
             return "access must be public or owner"
         if not line:
             return "empty command line"
-        self.cmds[name] = {**self.cmds.get(name, {}), "access": access, "cmd": line}
-        self.save()
-
-    def set_caption(self, name, text):
-        if name not in self.cmds:
-            return "no such command"
-        if len(text) > 1024:
-            return "caption over 1024 characters (Telegram limit)"
-        self.cmds[name]["caption"] = text
-        if not text:
-            del self.cmds[name]["caption"]
+        self.cmds[name] = {"access": access, "cmd": line, **({"caption": caption} if caption else {})}
         self.save()
 
     def remove(self, name):
@@ -268,11 +258,11 @@ class Bot:
         threading.Thread(target=self.execute, args=(chat, mid, argv, cwd), daemon=True).start()
 
     def run_argv(self, argv, cwd):
-        """Run argv with a fresh $OUT dir -> (ok, combined output text, out dir)."""
+        """Run argv with a fresh $OUT dir (and $CAPTION, a file path beside it) -> (ok, output text, out dir)."""
         out = os.path.join(RUNS, time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
         os.makedirs(out)
         try:
-            p = subprocess.run(argv, cwd=cwd or out, env={**os.environ, "OUT": out}, stdin=subprocess.DEVNULL,
+            p = subprocess.run(argv, cwd=cwd or out, env={**os.environ, "OUT": out, "CAPTION": out + ".caption"}, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=TIMEOUT)
             ok, text = p.returncode == 0, p.stdout.decode(errors="replace") + ("" if p.returncode == 0 else f"\n[exit {p.returncode}]")
         except subprocess.TimeoutExpired as e:
@@ -303,9 +293,21 @@ class Bot:
             shutil.rmtree(out, ignore_errors=True)
 
     def run_custom(self, chat, mid, name, cmd, args, who):
-        """Custom command: only the files in $OUT are posted (with the command's caption), never the
-        output. Any failure -> "Failed to retrieve" in the chat, full log as a file to the owner's PM."""
+        """Custom command: only the files in $OUT are posted, never the output. Caption: what the script
+        wrote to $CAPTION, else the /addcmd "## ..." template expanded now. Any failure -> "Failed to
+        retrieve" in the chat, full log as a file to the owner's PM."""
         ok, text, out = self.run_argv(["bash", "-c", cmd["cmd"], name, *args], None)
+        caption = None
+        try:
+            caption = open(out + ".caption").read().strip()
+            os.remove(out + ".caption")
+        except FileNotFoundError:
+            pass
+        if ok and not caption and cmd.get("caption"):
+            # unquoted heredoc: $1.., $OUT, $(...) expand; chat args are only ever values, never re-parsed
+            p = subprocess.run(["bash", "-c", f"cat <<__AXCAP__\n{cmd['caption']}\n__AXCAP__", name, *args],
+                               cwd=out, env={**os.environ, "OUT": out}, capture_output=True, text=True, timeout=60)
+            caption = p.stdout.strip()
         files = sorted(os.path.join(r, n) for r, _, ns in os.walk(out) for n in ns)
         problem = None if ok else "command failed"
         if ok and not files:
@@ -316,7 +318,7 @@ class Bot:
         if not problem:
             for f in files:
                 try:
-                    self.send_file(chat, f, mid, cmd.get("caption"))
+                    self.send_file(chat, f, mid, (caption or None) and caption[:1024])
                 except Exception as e:
                     problem = f"upload {os.path.basename(f)} failed: {e}"
                     break
@@ -346,8 +348,8 @@ class Bot:
         if owner:
             lines += ["", "owner:", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
-                      "/addcmd &lt;name&gt; &lt;public|owner&gt; &lt;command line&gt; – files written to $OUT are sent back",
-                      "/caption &lt;name&gt; [text] – text posted with that command's files (empty = remove)",
+                      "/addcmd &lt;name&gt; &lt;public|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
+                      "caption = what the script writes to $CAPTION, else the ## text expanded each run ($1, $(date)…)",
                       "/delcmd &lt;name&gt;"]
         self.say(chat, "\n".join(lines), mid)
 
@@ -374,7 +376,7 @@ class Bot:
 
     def cmd_cmds(self, chat, mid, rest, owner):
         rows = [f"/{n} – {c['access']}" + (f": <code>{html.escape(c['cmd'])}</code>" if owner else "")
-                + (f"\n    caption: {html.escape(c['caption'])}" if owner and c.get("caption") else "")
+                + (f" ## {html.escape(c['caption'])}" if owner and c.get("caption") else "")
                 for n, c in sorted(self.reg.cmds.items()) if owner or c["access"] == "public"]
         self.say(chat, "\n".join(rows) or "no custom commands.", mid)
 
@@ -396,14 +398,11 @@ class Bot:
         self.spawn(chat, mid, [os.path.join(REPO, "release/tg_post.sh"), "-y", *split_args(rest)], cwd=REPO)
 
     def cmd_addcmd(self, chat, mid, rest, owner):
-        parts = rest.split(None, 2)
-        err = self.reg.add(*(parts + [""] * (3 - len(parts)))) if len(parts) >= 2 else "usage: /addcmd <name> <public|owner> <command line>"
+        line, _, caption = rest.partition(" ## ")
+        parts = line.split(None, 2)
+        err = (self.reg.add(*(parts + [""] * (3 - len(parts))), caption.strip()) if len(parts) >= 2
+               else "usage: /addcmd <name> <public|owner> <command line> [## caption]")
         self.meh(chat, mid, err) if err else self.say(chat, f"added /{parts[0]} ({parts[1]})", mid)
-
-    def cmd_caption(self, chat, mid, rest, owner):
-        name, _, text = rest.partition(" ")
-        err = self.reg.set_caption(name, text.strip()) if name else "usage: /caption <name> [text]  (no text = remove)"
-        self.meh(chat, mid, err) if err else self.say(chat, f"caption for /{name} " + ("set" if text.strip() else "removed"), mid)
 
     def cmd_delcmd(self, chat, mid, rest, owner):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
@@ -434,10 +433,8 @@ def selftest():
         assert r.add("hello", "public", "echo hi") is None
         assert r.add("sh", "public", "x") and r.add("Bad-Name", "public", "x") and r.add("ok", "root", "x")
         assert Registry(r.path).cmds == {"hello": {"access": "public", "cmd": "echo hi"}}
-        assert r.set_caption("hello", "Here you go") is None and r.cmds["hello"]["caption"] == "Here you go"
-        assert r.add("hello", "owner", "echo bye") is None and r.cmds["hello"]["caption"] == "Here you go"
-        assert r.set_caption("hello", "") is None and "caption" not in r.cmds["hello"]
-        assert r.set_caption("nope", "x") and r.set_caption("hello", "x" * 1025)
+        assert r.add("hello", "owner", "echo bye", "cap $1") is None and r.cmds["hello"]["caption"] == "cap $1"
+        assert r.add("hello", "owner", "echo bye") is None and "caption" not in r.cmds["hello"]
         assert r.remove("hello") is None and r.remove("hello")
         # custom command runner, Telegram stubbed out
         global RUNS, LOGS
@@ -446,8 +443,15 @@ def selftest():
         b.owner, sent, said = 7, [], []
         b.send_file = lambda chat, path, reply=None, caption=None: sent.append((chat, os.path.basename(path), caption, open(path).read()))
         b.say = lambda chat, text, reply=None, pre=False: said.append(text)
-        b.run_custom(-100, 1, "t", {"cmd": 'echo noise; echo "$1" > "$OUT/r.txt"', "caption": "cap"}, ["hi"], "u")
-        assert sent == [(-100, "r.txt", "cap", "hi\n")] and said == [], (sent, said)
+        mk = 'echo noise; echo "$1" > "$OUT/r.txt"'
+        b.run_custom(-100, 1, "t", {"cmd": mk, "caption": "for $1: $(ls) \"q\""}, ["$(id)"], "u")
+        assert sent == [(-100, "r.txt", 'for $(id): r.txt "q"', "$(id)\n")] and said == [], (sent, said)
+        sent.clear()      # script-written $CAPTION wins over the template
+        b.run_custom(-100, 1, "t", {"cmd": mk + '; echo "made $1" > "$CAPTION"', "caption": "tmpl"}, ["x"], "u")
+        assert sent[0][2] == "made x" and not os.listdir(RUNS), sent
+        sent.clear()
+        b.run_custom(-100, 1, "t", {"cmd": mk}, ["x"], "u")
+        assert sent[0][2] is None, sent
         for line in ("echo boom; exit 3", "echo done"):          # failing command / no file left
             sent.clear(); said.clear()
             b.run_custom(-100, 1, "t", {"cmd": line}, [], "u")

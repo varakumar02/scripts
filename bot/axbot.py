@@ -101,8 +101,8 @@ class Registry:
     def add(self, name, access, line, caption=""):
         if not NAME_RE.match(name) or name in BUILTIN_OWNER | BUILTIN_PUBLIC:
             return "name must be [a-z0-9_]{1,32} and not a built-in"
-        if access not in ("public", "owner"):
-            return "access must be public or owner"
+        if access not in ("public", "admin", "owner"):
+            return "access must be public, admin or owner"
         if not line:
             return "empty command line"
         self.cmds[name] = {"access": access, "cmd": line, **({"caption": caption} if caption else {})}
@@ -231,6 +231,9 @@ class Bot:
         if name in BUILTIN_OWNER or (custom and custom["access"] == "owner"):
             if not owner:
                 return self.meh(chat, mid)
+        elif custom and custom["access"] == "admin":
+            if not (owner or self.is_admin(msg)):
+                return self.meh(chat, mid)
         elif name not in BUILTIN_PUBLIC and not custom:
             # unknown: answer in PM or when aimed at us; a bare /foo in the group may be another bot's
             if addressed or msg["chat"]["type"] == "private":
@@ -243,10 +246,21 @@ class Bot:
             return threading.Thread(target=self.run_custom, daemon=True,
                                     args=(chat, mid, name, custom, split_args(rest), who)).start()
         try:
-            getattr(self, "cmd_" + name.replace("!", "_now"))(chat, mid, rest, owner)
+            getattr(self, "cmd_" + name.replace("!", "_now"))(chat, mid, rest, owner, msg)
         except Exception as e:
             print(f"/{name}: {e!r}", file=sys.stderr, flush=True)
             self.meh(chat, mid, str(e) if owner else None)
+
+    def is_admin(self, msg):
+        """Admin (or creator) of OUR group -- never of whatever chat the message came from. A message
+        sent as the group itself (anonymous admin) can only come from one of its admins."""
+        if "sender_chat" in msg:
+            return msg["sender_chat"]["id"] == self.group
+        try:
+            m = self.api("getChatMember", chat_id=self.group, user_id=msg.get("from", {}).get("id"))
+        except RuntimeError:
+            return False
+        return m["status"] in ("creator", "administrator")
 
     def meh(self, chat, mid, why=None):
         """Wrong command: a random MEH emoji; the owner also gets the reason."""
@@ -339,21 +353,21 @@ class Bot:
 
     # -- built-ins (public)
 
-    def cmd_start(self, chat, mid, rest, owner):
-        self.cmd_help(chat, mid, rest, owner)
+    def cmd_start(self, chat, mid, rest, owner, msg):
+        self.cmd_help(chat, mid, rest, owner, msg)
 
-    def cmd_help(self, chat, mid, rest, owner):
+    def cmd_help(self, chat, mid, rest, owner, msg):
         lines = ["/builds [lemonade|lemonadep] – newest release post",
                  "/changelog – changelog", "/cmds – custom commands"]
         if owner:
             lines += ["", "owner:", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
-                      "/addcmd &lt;name&gt; &lt;public|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
+                      "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
                       "caption = what the script writes to $CAPTION, else the ## text expanded each run ($1, $(date)…)",
                       "/delcmd &lt;name&gt;"]
         self.say(chat, "\n".join(lines), mid)
 
-    def cmd_builds(self, chat, mid, rest, owner):
+    def cmd_builds(self, chat, mid, rest, owner, msg):
         rest = rest.lower()
         if rest and rest not in DEVICES:
             return self.meh(chat, mid)
@@ -367,44 +381,46 @@ class Bot:
             else:
                 self.api("forwardMessage", chat_id=chat, from_chat_id=self.group, message_id=post)
 
-    def cmd_changelog(self, chat, mid, rest, owner):
+    def cmd_changelog(self, chat, mid, rest, owner, msg):
         try:
             text = urllib.request.urlopen(RAW + "OTA/GMS/changelogs_op9.txt", timeout=20).read().decode()
         except Exception as e:
             text = f"unavailable ({e})"
         self.say(chat, html.escape(text[:4000]), mid)
 
-    def cmd_cmds(self, chat, mid, rest, owner):
+    def cmd_cmds(self, chat, mid, rest, owner, msg):
+        admin = owner or self.is_admin(msg)
         rows = [f"/{n} – {c['access']}" + (f": <code>{html.escape(c['cmd'])}</code>" if owner else "")
                 + (f" ## {html.escape(c['caption'])}" if owner and c.get("caption") else "")
-                for n, c in sorted(self.reg.cmds.items()) if owner or c["access"] == "public"]
+                for n, c in sorted(self.reg.cmds.items())
+                if owner or c["access"] == "public" or (c["access"] == "admin" and admin)]
         self.say(chat, "\n".join(rows) or "no custom commands.", mid)
 
     # -- built-ins (owner)
 
-    def cmd_status(self, chat, mid, rest, owner):
+    def cmd_status(self, chat, mid, rest, owner, msg):
         self.spawn(chat, mid, ["bash", "-c", "uptime; vcgencmd measure_temp 2>/dev/null; free -h; df -h / | tail -1; "
                                              "systemctl is-active axbot 2>/dev/null"])
 
-    def cmd_sh(self, chat, mid, rest, owner):
+    def cmd_sh(self, chat, mid, rest, owner, msg):
         if not rest:
             return self.meh(chat, mid, "usage: /sh <command>")
         self.spawn(chat, mid, ["bash", "-c", rest], cwd=os.path.expanduser("~"))
 
-    def cmd_post(self, chat, mid, rest, owner):
+    def cmd_post(self, chat, mid, rest, owner, msg):
         self.spawn(chat, mid, [os.path.join(REPO, "release/tg_post.sh"), "--dry-run", *split_args(rest)], cwd=REPO)
 
-    def cmd_post_now(self, chat, mid, rest, owner):
+    def cmd_post_now(self, chat, mid, rest, owner, msg):
         self.spawn(chat, mid, [os.path.join(REPO, "release/tg_post.sh"), "-y", *split_args(rest)], cwd=REPO)
 
-    def cmd_addcmd(self, chat, mid, rest, owner):
+    def cmd_addcmd(self, chat, mid, rest, owner, msg):
         line, _, caption = rest.partition(" ## ")
         parts = line.split(None, 2)
         err = (self.reg.add(*(parts + [""] * (3 - len(parts))), caption.strip()) if len(parts) >= 2
-               else "usage: /addcmd <name> <public|owner> <command line> [## caption]")
+               else "usage: /addcmd <name> <public|admin|owner> <command line> [## caption]")
         self.meh(chat, mid, err) if err else self.say(chat, f"added /{parts[0]} ({parts[1]})", mid)
 
-    def cmd_delcmd(self, chat, mid, rest, owner):
+    def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
         self.meh(chat, mid, err) if err else self.say(chat, f"removed /{rest}", mid)
 
@@ -432,10 +448,20 @@ def selftest():
         r = Registry(os.path.join(d, "x", "c.json"))
         assert r.add("hello", "public", "echo hi") is None
         assert r.add("sh", "public", "x") and r.add("Bad-Name", "public", "x") and r.add("ok", "root", "x")
+        assert r.add("adm", "admin", "x") is None and r.remove("adm") is None
         assert Registry(r.path).cmds == {"hello": {"access": "public", "cmd": "echo hi"}}
         assert r.add("hello", "owner", "echo bye", "cap $1") is None and r.cmds["hello"]["caption"] == "cap $1"
         assert r.add("hello", "owner", "echo bye") is None and "caption" not in r.cmds["hello"]
         assert r.remove("hello") is None and r.remove("hello")
+        # admin = admin of our group only
+        b = Bot.__new__(Bot)
+        b.group, status = -100, {}
+        b.api = lambda method, **kw: {"status": status.get(kw["user_id"], "left")}
+        status.update({1: "administrator", 2: "creator", 3: "member"})
+        assert b.is_admin({"from": {"id": 1}}) and b.is_admin({"from": {"id": 2}})
+        assert not b.is_admin({"from": {"id": 3}}) and not b.is_admin({"from": {"id": 4}})
+        assert b.is_admin({"from": {"id": 1087968824}, "sender_chat": {"id": -100}})
+        assert not b.is_admin({"from": {"id": 136817688}, "sender_chat": {"id": -200}})
         # custom command runner, Telegram stubbed out
         global RUNS, LOGS
         RUNS, LOGS = os.path.join(d, "runs"), os.path.join(d, "logs")

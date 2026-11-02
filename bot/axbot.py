@@ -28,9 +28,8 @@ KEEP_POSTS = 3        # release posts remembered per device, so a deleted one fa
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update"}
 BUILTIN_PUBLIC = {"start", "help", "builds", "changelog", "cmds"}
-BUILTIN_ADMIN = {"update"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
@@ -116,7 +115,7 @@ class Registry:
         os.replace(tmp, self.path)
 
     def add(self, name, access, line, caption=""):
-        if not NAME_RE.match(name) or name in BUILTIN_OWNER | BUILTIN_PUBLIC | BUILTIN_ADMIN:
+        if not NAME_RE.match(name) or name in BUILTIN_OWNER | BUILTIN_PUBLIC:
             return "name must be [a-z0-9_]{1,32} and not a built-in"
         if access not in ("public", "admin", "owner"):
             return "access must be public, admin or owner"
@@ -263,13 +262,13 @@ class Bot:
         mid = msg["message_id"]
         custom = self.reg.cmds.get(name)
         # sent while the bot was down (Telegram queues updates for 24 h): say so before the late answer
-        will_answer = name in BUILTIN_OWNER | BUILTIN_PUBLIC | BUILTIN_ADMIN or custom or addressed or private
+        will_answer = name in BUILTIN_OWNER | BUILTIN_PUBLIC or custom or addressed or private
         if will_answer and time.time() - msg.get("date", time.time()) > STALE_AFTER:
             self.say(chat, OFFLINE, mid)
         if name in BUILTIN_OWNER or (custom and custom["access"] == "owner"):
             if not owner:
                 return self.say(chat, DENIED, mid)
-        elif name in BUILTIN_ADMIN or (custom and custom["access"] == "admin"):
+        elif custom and custom["access"] == "admin":
             if not (owner or self.is_admin(msg)):
                 return self.say(chat, DENIED, mid)
         elif name not in BUILTIN_PUBLIC and not custom:
@@ -422,7 +421,7 @@ class Bot:
                     "/changelog – changelog", "/cmds – custom commands", *custom("public")]
         if not admin:
             return "\n".join(everyone)
-        lines = ["👥 <b>Everyone</b>", *everyone, "", "🛡 <b>Admins</b>", "/update – pull the newest bot code, self-test, restart", *custom("admin")]
+        lines = ["👥 <b>Everyone</b>", *everyone, "", "🛡 <b>Admins</b>", *(custom("admin") or ["(no admin commands yet)"])]
         if owner:
             lines += ["", "👑 <b>Owner</b>",
                       "/status – Pi health",
@@ -430,6 +429,7 @@ class Bot:
                       "/post [args] – tg_post.sh --dry-run",
                       "/post! [args] – tg_post.sh, send for real",
                       "/setbuild [device] – reply to a release post: /builds shows it",
+                      "/update – pull the newest bot code, self-test, restart",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption]",
                       "    files the command leaves in $OUT are posted, its output never",
                       "    text: $OUT/tg_message.txt (HTML or *Markdown*), else the ## caption ($1, $(date)… per run)",
@@ -605,7 +605,7 @@ def selftest():
         b.owner, b.reg.cmds["own"]["cmd"] = 7, "true"
         b.is_admin = lambda msg: msg["from"]["id"] == 6
         b.meh = lambda chat, mid, why=None: out.append((chat, "MEH"))
-        for uid, text, want in ((5, "/update", DENIED), (5, "/sh ls", DENIED), (5, "/own", DENIED), (5, "/adm", DENIED), (6, "/own", DENIED),
+        for uid, text, want in ((5, "/update", DENIED), (6, "/update", DENIED), (5, "/sh ls", DENIED), (5, "/own", DENIED), (5, "/adm", DENIED), (6, "/own", DENIED),
                                 (6, "/addcmd x public y", DENIED), (5, "/nope@axbot", "MEH"), (5, "/builds x", "MEH"),
                                 (5, "/help me", "MEH")):
             out.clear()

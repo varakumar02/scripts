@@ -217,9 +217,10 @@ class Bot:
         if not msg:
             return
         chat = msg["chat"]["id"]
-        if not chat_allowed(chat, self.group, self.owner):
+        private = msg["chat"]["type"] == "private"
+        if not chat_allowed(chat, self.group, self.owner) and not (private and self.in_group(chat)):
             print(f"ignored update from chat {chat} ({msg['chat']['type']})", flush=True)
-            if msg["chat"]["type"] != "private":
+            if not private:
                 print(f"leaving foreign chat {chat} {msg['chat'].get('title')!r}", flush=True)
                 try:
                     self.api("leaveChat", chat_id=chat)
@@ -268,11 +269,31 @@ class Bot:
         sent as the group itself (anonymous admin) can only come from one of its admins."""
         if "sender_chat" in msg:
             return msg["sender_chat"]["id"] == self.group
+        return self.group_status(msg.get("from", {}).get("id")) in ("creator", "administrator")
+
+    def group_status(self, uid):
         try:
-            m = self.api("getChatMember", chat_id=self.group, user_id=msg.get("from", {}).get("id"))
+            return self.api("getChatMember", chat_id=self.group, user_id=uid)["status"]
         except RuntimeError:
-            return False
-        return m["status"] in ("creator", "administrator")
+            return "left"
+
+    def in_group(self, uid):
+        """PMs are answered for members of our group (and the owner); everyone else is ignored."""
+        return self.group_status(uid) in ("creator", "administrator", "member", "restricted")
+
+    def reply_by_role(self, chat, mid, msg, everyone, mine):
+        """Group replies are seen by all, so the group only ever gets `everyone`; an admin's or the
+        owner's own list (`mine`, None for members) goes to their PM."""
+        if chat != self.group or mine is None:
+            return self.say(chat, mine or everyone, mid)
+        self.say(chat, everyone, mid)
+        if "sender_chat" in msg:          # anonymous admin: no PM to send to
+            return
+        try:
+            self.api("sendMessage", chat_id=msg["from"]["id"], text=mine, parse_mode="HTML",
+                     disable_web_page_preview="true")
+        except RuntimeError:
+            self.say(chat, f"📬 Your full list is waiting: open @{self.me} in a private chat, press Start, then /help.", mid)
 
     def meh(self, chat, mid, why=None):
         """Wrong command: a random MEH emoji; the owner also gets the reason."""
@@ -387,21 +408,24 @@ class Bot:
     def cmd_start(self, chat, mid, rest, owner, msg):
         self.cmd_help(chat, mid, rest, owner, msg)
 
-    def cmd_help(self, chat, mid, rest, owner, msg):
-        admin = owner or self.is_admin(msg)
+    def help_text(self, owner, admin):
         custom = lambda access: [f"/{n}" for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
-        lines = [f"👤 You're {'the owner' if owner else 'an admin' if admin else 'a member'}", "",
-                 "<b>Everyone</b>", "/help – this list", "/builds [lemonade|lemonadep] – newest release post",
+        lines = ["/help – this list", "/builds [lemonade|lemonadep] – newest release post",
                  "/changelog – changelog", "/cmds – custom commands", *custom("public")]
-        if admin and custom("admin"):
-            lines += ["", "<b>Admins</b>", *custom("admin")]
+        if admin:
+            lines += custom("admin")
         if owner:
-            lines += ["", "<b>Owner</b>", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
+            lines += ["/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
                       "post text = $OUT/tg_message.txt (HTML or *Markdown*) if the script wrote one, else the ## text expanded each run ($1, $(date)…)",
                       "/delcmd &lt;name&gt;", *custom("owner")]
-        self.say(chat, "\n".join(lines), mid)
+        return "\n".join(lines)
+
+    def cmd_help(self, chat, mid, rest, owner, msg):
+        admin = owner or self.is_admin(msg)
+        self.reply_by_role(chat, mid, msg, self.help_text(False, False),
+                           self.help_text(owner, admin) if admin else None)
 
     def cmd_builds(self, chat, mid, rest, owner, msg):
         rest = rest.lower()
@@ -424,13 +448,17 @@ class Bot:
             text = f"unavailable ({e})"
         self.say(chat, html.escape(text[:4000]), mid)
 
-    def cmd_cmds(self, chat, mid, rest, owner, msg):
-        admin = owner or self.is_admin(msg)
-        rows = [f"/{n} – {c['access']}" + (f": <code>{html.escape(c['cmd'])}</code>" if owner else "")
+    def cmds_text(self, owner, admin):
+        rows = [f"/{n}" + (f" – {c['access']}: <code>{html.escape(c['cmd'])}</code>" if owner else "")
                 + (f" ## {html.escape(c['caption'])}" if owner and c.get("caption") else "")
                 for n, c in sorted(self.reg.cmds.items())
                 if owner or c["access"] == "public" or (c["access"] == "admin" and admin)]
-        self.say(chat, "\n".join(rows) or "no custom commands.", mid)
+        return "\n".join(rows) or "no custom commands."
+
+    def cmd_cmds(self, chat, mid, rest, owner, msg):
+        admin = owner or self.is_admin(msg)
+        self.reply_by_role(chat, mid, msg, self.cmds_text(False, False),
+                           self.cmds_text(owner, admin) if admin else None)
 
     # -- built-ins (owner)
 
@@ -491,18 +519,29 @@ def selftest():
         assert r.add("hello", "owner", "echo bye", "cap $1") is None and r.cmds["hello"]["caption"] == "cap $1"
         assert r.add("hello", "owner", "echo bye") is None and "caption" not in r.cmds["hello"]
         assert r.remove("hello") is None and r.remove("hello")
-        # /help shows each role only what it may run
+        # /help and /cmds: each role sees only what it may run; the group only ever sees members' list
         b = Bot.__new__(Bot)
-        b.reg, got = Registry(os.path.join(d, "h.json")), []
+        b.group, b.me, b.reg, out = -100, "axbot", Registry(os.path.join(d, "h.json")), []
         for n, acc in (("pub", "public"), ("adm", "admin"), ("own", "owner")):
             b.reg.add(n, acc, "true")
-        b.say = lambda chat, text, reply=None, pre=False: got.append(text)
-        for owner, admin, want, hide in ((False, False, ["/pub"], ["/adm", "/own", "/sh"]),
-                                         (False, True, ["/pub", "/adm"], ["/own", "/sh"]),
-                                         (True, True, ["/pub", "/adm", "/own", "/sh", "/addcmd"], [])):
-            b.is_admin = lambda msg, a=admin: a
-            b.cmd_help(1, 1, "", owner, {})
-            assert all(w in got[-1] for w in want) and not any(h in got[-1] for h in hide), got[-1]
+        b.say = lambda chat, text, reply=None, pre=False: out.append((chat, text))
+        b.api = lambda method, **kw: out.append((kw["chat_id"], kw["text"]))
+        member, admin_, owner_ = (["/pub"], ["/adm", "/own", "/sh", "/addcmd"]), \
+            (["/pub", "/adm"], ["/own", "/sh", "/addcmd"]), (["/pub", "/adm", "/own", "/sh", "/addcmd"], [])
+        def sees(text, role):
+            only_custom = cmd == b.cmd_cmds                    # /cmds lists custom commands only
+            keep = lambda xs: [x for x in xs if not only_custom or x in ("/pub", "/adm", "/own")]
+            return all(w in text for w in keep(role[0])) and not any(h in text for h in keep(role[1]))
+        for cmd in (b.cmd_help, b.cmd_cmds):
+            for owner, admin, role in ((False, False, member), (False, True, admin_), (True, True, owner_)):
+                b.is_admin = lambda msg, a=admin: a
+                out.clear()                                    # in the group
+                cmd(-100, 1, "", owner, {"from": {"id": 5}})
+                assert out[0][0] == -100 and sees(out[0][1], member), out
+                assert len(out) == (2 if admin else 1) and (not admin or (out[1][0] == 5 and sees(out[1][1], role))), out
+                out.clear()                                    # in their PM
+                cmd(5, 1, "", owner, {"from": {"id": 5}})
+                assert len(out) == 1 and out[0][0] == 5 and sees(out[0][1], role), out
         # admin = admin of our group only
         b = Bot.__new__(Bot)
         b.group, status = -100, {}

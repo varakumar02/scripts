@@ -15,13 +15,15 @@ fresh directory in $OUT (also the cwd); files left there are sent back.
   python3 bot/axbot.py             # run
   python3 bot/axbot.py --selftest  # checks for the parsing/permission logic
 """
-import base64, html, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid
-import urllib.error, urllib.parse, urllib.request
+import base64, datetime, html, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid
+import urllib.error, urllib.parse, urllib.request, zoneinfo
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.expanduser("~/.config/axbot/commands.json")
 LATEST = os.path.expanduser("~/.config/axbot/latest.json")
 BUGS = os.path.expanduser("~/.config/axbot/bugs.json")
+WEEKLY = os.path.expanduser("~/.config/axbot/weekly.json")      # ISO week of the last weekly post
+WEEKLY_AT = (0, 10)          # (weekday, hour) in IST the weekly storage post goes out from: Monday 10:00
 RESTARTED = os.path.expanduser("~/.config/axbot/restarted.json")   # set by /update, read once at start
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
 LOGS = os.path.expanduser("~/.cache/axbot/logs")
@@ -200,6 +202,54 @@ def size(n):
 
 
 RULE = "━━━━━━━━━━━━━━━━━━━━━━"
+IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+CHART = "https://quickchart.io/chart?w=1400&h=700&bkg=white&c="     # Chart.js config in, PNG out
+
+
+def iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def pct(part, whole):
+    return f"{100 * part / whole:.1f}%" if whole > 0 else "n/a"
+
+
+def storage_text(u, folder_bytes, folder_files, now, title, period):
+    """Pixeldrain caption, laid out like the group's existing dashboard post. `period` is
+    [(label, bytes)] for the transfer lines specific to this report (this month, this week)."""
+    sub = u["subscription"]
+    cap, used = sub["storage_space"], u["storage_space_used"]
+    fs_cap, fs_used = sub["filesystem_storage_limit"], u["filesystem_storage_used"]
+    tx_cap, tx_used = sub["monthly_transfer_cap"], u["monthly_transfer_used"]   # pixeldrain: rolling ~30 days
+    left = lambda c, n: "unlimited left (n/a)" if c < 0 else f"{size(c - n)} left ({pct(n, c)})"
+    when = datetime.datetime.fromtimestamp(now, IST)
+    return "\n".join([
+        f"📊 <b>Pixeldrain {html.escape(sub['name'])} — {title}</b>", RULE,
+        f"🗄️ Storage: {size(used)} used, {left(cap, used)}",
+        f"📁 Filesystem: {size(fs_used)} used, {left(fs_cap, fs_used)}",
+        f"📂 {PD_FOLDER}: {size(folder_bytes)} · {folder_files} files",
+        *(f"📥 Transfer ({label}): {size(n)}" for label, n in period),
+        f"📥 Transfer (last 30 days): {size(tx_used)} used, {left(tx_cap, tx_used)}",
+        f"🔢 Files: {u['file_count']}",
+        "",
+        f"🕐 Updated {when.day}/{when.month}/{when.year}, {when.strftime('%I:%M:%S %p').lower()} IST"])
+
+
+def utc_day(t):
+    """Start of t's UTC day: pixeldrain's daily buckets begin at UTC midnight."""
+    return t - t % 86400
+
+
+def chart_url(series, title, fmt):
+    """QuickChart URL for a pixeldrain transfer series: x labels in IST as `fmt`, values in GB."""
+    labels = [datetime.datetime.fromisoformat(t.replace("Z", "+00:00")).astimezone(IST).strftime(fmt).lower()
+              for t in series["timestamps"]]
+    cfg = {"type": "line", "data": {"labels": labels, "datasets": [{
+        "label": title, "data": [round(a / 1e9, 3) for a in series["amounts"]],
+        "borderColor": "#7c3aed", "backgroundColor": "rgba(124,58,237,0.2)", "borderWidth": 4,
+        "pointRadius": 0, "fill": True, "lineTension": 0}]},
+        "options": {"scales": {"yAxes": [{"ticks": {"beginAtZero": True}}]}}}
+    return CHART + urllib.parse.quote(json.dumps(cfg, separators=(",", ":")))
 
 
 def span(sec):
@@ -301,6 +351,8 @@ class Bot:
         while True:
             try:
                 self.track_pin()
+                if self.weekly_due(time.time()):
+                    self.weekly_report()
                 ups = self.api("getUpdates", http_timeout=45, timeout=25, offset=self.offset,
                                allowed_updates=["message", "my_chat_member"])
             except Exception as e:
@@ -779,24 +831,60 @@ class Bot:
             return self.meh(chat, mid, "PIXELDRAIN_API_KEY is not set in .env")
         threading.Thread(target=self.storage_report, args=(chat, mid), daemon=True).start()
 
+    def pd_report(self, days_back):
+        """-> (user, folder bytes, folder files, now, daily series over the last `days_back` UTC days)."""
+        u = self.pd_get("user")
+        used, files = self.folder_size("me/" + PD_FOLDER)
+        now = time.time()
+        daily = self.pd_get(f"user/time_series/transfer_paid?start={iso(utc_day(now) - days_back * 86400)}"
+                            f"&end={iso(now)}&interval=1440")
+        return u, used, files, now, daily
+
     def storage_report(self, chat, mid):
         try:
-            u = self.pd_get("user")
-            used, files = self.folder_size("me/" + PD_FOLDER)
+            now = time.time()
+            month = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).day - 1    # whole days before today
+            u, used, files, now, mon = self.pd_report(month)
+            day = self.pd_get(f"user/time_series/transfer_paid?start={iso(now - 86400)}&end={iso(now)}&interval=60")
         except Exception as e:
             return self.meh(chat, mid, f"pixeldrain: {e}")
-        sub = u["subscription"]
-        fs_used, fs_cap = u["filesystem_storage_used"], sub["filesystem_storage_limit"]
-        tx_used, tx_cap = u["monthly_transfer_used"], sub["monthly_transfer_cap"]
-        self.say(chat, "\n".join([
-            "💾 <b>Download Server Storage</b>", RULE,
-            f"🌐 Host: https://pixeldrain.com · {html.escape(sub['name'])}",
-            f"📁 {PD_FOLDER} folder: <b>{size(used)}</b> · {files} files",
-            f"🗄 Storage: {size(fs_used)} / {size(fs_cap)}",
-            f"✅ Free: <b>{size(fs_cap - fs_used)}</b>",
-            f"📶 Bandwidth: {size(tx_used)} / {size(tx_cap)} this month",
-            f"✅ Left: <b>{size(tx_cap - tx_used)}</b>",
-            "<i>Bandwidth is account-wide; pixeldrain does not count it per folder.</i>"]), mid)
+        name = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%B %Y")
+        text = storage_text(u, used, files, now, "Dashboard", [("this month", sum(mon["amounts"]))])
+        try:
+            self.api("sendMediaGroup", chat_id=chat, reply_to_message_id=mid, allow_sending_without_reply="true", media=[
+                {"type": "photo", "media": chart_url(day, "Bandwidth (GB) — last 24h", "%I:%M %p"),
+                 "caption": text, "parse_mode": "HTML"},
+                {"type": "photo", "media": chart_url(mon, f"Bandwidth (GB) — {name}", "%d %b")}])
+        except Exception as e:                      # chart service down: the numbers still go out
+            print("storage chart failed:", e, file=sys.stderr, flush=True)
+            self.say(chat, text, mid)
+
+    def weekly_due(self, now):
+        """True once per ISO week, from WEEKLY_AT (Monday 10:00 IST) on; catches up later that week if
+        the Pi was off. The first run only records the current week, so an update never posts at once."""
+        t = datetime.datetime.fromtimestamp(now, IST)
+        week = "%d-W%02d" % t.isocalendar()[:2]
+        last = load_json(WEEKLY, {}).get("week")
+        if last is None:
+            dump_json(WEEKLY, {"week": week})
+            return False
+        return week != last and (t.weekday(), t.hour) >= WEEKLY_AT
+
+    def weekly_report(self):
+        """Weekly storage post in the group: the last 7 UTC days' transfer and its daily chart."""
+        try:
+            u, used, files, now, week = self.pd_report(6)
+            text = storage_text(u, used, files, now, "Weekly Report", [("this week", sum(week["amounts"]))])
+            try:
+                self.api("sendPhoto", chat_id=self.group, photo=chart_url(week, "Bandwidth (GB) — this week", "%a %d %b"),
+                         caption=text, parse_mode="HTML")
+            except RuntimeError as e:
+                print("weekly chart failed:", e, file=sys.stderr, flush=True)
+                self.say(self.group, text)
+        except Exception as e:                      # pixeldrain down: tried again next poll
+            return print("weekly report failed:", e, file=sys.stderr, flush=True)
+        t = datetime.datetime.fromtimestamp(now, IST)
+        dump_json(WEEKLY, {"week": "%d-W%02d" % t.isocalendar()[:2]})
 
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
@@ -943,14 +1031,42 @@ def selftest():
         assert size(999) == "999 B" and size(31_860_000_000) == "31.86 GB" and size(4e12) == "4.00 TB"
         tree = {"filesystem/me/Axion?stat": [{"type": "dir", "path": "/me/Axion/lemonade"}, {"type": "file", "file_size": 600}],
                 "filesystem/me/Axion/lemonade?stat": [{"type": "file", "file_size": 2_000_000_000}, {"type": "file", "file_size": 400}]}
-        user = {"subscription": {"name": "Pro", "filesystem_storage_limit": 2_000_000_000_000, "monthly_transfer_cap": 4_000_000_000_000},
-                "filesystem_storage_used": 83_000_000_000, "monthly_transfer_used": 619_000_000_000}
-        b.pd_get = lambda path: user if path == "user" else {"children": tree[path]}
+        user = {"subscription": {"name": "Pro", "storage_space": -1, "filesystem_storage_limit": 2_000_000_000_000,
+                                 "monthly_transfer_cap": 4_000_000_000_000},
+                "storage_space_used": 130_670_000_000, "filesystem_storage_used": 83_000_000_000,
+                "monthly_transfer_used": 619_000_000_000, "file_count": 56}
+        series = {"timestamps": ["2026-11-01T22:00:00Z", "2026-11-01T23:00:00Z"], "amounts": [0, 2_800_000_000]}
+        b.pd_get = lambda path: user if path == "user" else series if "time_series" in path else {"children": tree[path]}
         assert b.folder_size("me/Axion") == (2_000_001_000, 3)
-        out.clear()
+        t = storage_text(user, 2_000_001_000, 3, 1788500000, "Dashboard", [("this month", 2_800_000_000)])
+        for want in ("Pixeldrain Pro — Dashboard", "130.67 GB used, unlimited left (n/a)", "83.00 GB used, 1.92 TB left (4.2%)",
+                     "Axion: 2.00 GB · 3 files", "Transfer (this month): 2.80 GB",
+                     "Transfer (last 30 days): 619.00 GB used, 3.38 TB left (15.5%)", "Files: 56", "IST"):
+            assert want in t, (want, t)
+        cfg = json.loads(urllib.parse.unquote(chart_url(series, "t", "%I:%M %p")[len(CHART):]))
+        assert cfg["data"]["labels"] == ["03:30 am", "04:30 am"] and cfg["data"]["datasets"][0]["data"] == [0, 2.8]
+        photos = []
+        b.api = lambda method, **kw: photos.append((method, kw["chat_id"], [(m["media"][:len(CHART)], m.get("caption", "")[:12])
+                                                                           for m in kw["media"]]))
         b.storage_report(7, 1)
-        assert "Axion folder: <b>2.00 GB</b> · 3 files" in out[0][1] and "Free: <b>1.92 TB</b>" in out[0][1] \
-            and "Left: <b>3.38 TB</b>" in out[0][1], out
+        assert photos == [("sendMediaGroup", 7, [(CHART, "📊 <b>Pixeldr"), (CHART, "")])], photos
+        out.clear()       # chart failing still sends the numbers
+        b.api = lambda method, **kw: (_ for _ in ()).throw(RuntimeError("Bad Request: wrong file"))
+        b.storage_report(7, 1)
+        assert out and "Dashboard" in out[0][1], out
+        # weekly post: first run only records the week; due once a week from Monday 10:00 IST
+        global WEEKLY
+        WEEKLY = os.path.join(d, "weekly.json")
+        mon9, mon10, wed = (datetime.datetime(2026, 11, 9, h, tzinfo=IST).timestamp() for h in (9, 10, 0))
+        wed += 2 * 86400
+        assert not b.weekly_due(mon10) and load_json(WEEKLY, {}) == {"week": "2026-W46"}
+        dump_json(WEEKLY, {"week": "2026-W40"})
+        assert not b.weekly_due(mon9) and b.weekly_due(mon10) and b.weekly_due(wed)
+        posted = []
+        b.api = lambda method, **kw: posted.append((method, kw["chat_id"], "Weekly Report" in kw["caption"]))
+        b.weekly_report()
+        assert posted == [("sendPhoto", -100, True)] and load_json(WEEKLY, {})["week"] != "2026-W40", posted
+        assert utc_day(86400 * 3 + 500) == 86400 * 3
         # history: newest first, max KEEP_POSTS, re-adding moves to front; deleted posts fall through
         for i in (41, 42, 43, 41):
             b.remember({"message_id": i, "text": "#lemonade"})

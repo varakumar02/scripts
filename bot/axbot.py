@@ -70,6 +70,10 @@ def post_device(text):
 # The whole reply to any wrong command: one of these, at random.
 MEH = ("😑", "👍", "😒", "😫", "😩", "🫨", "😬", "🥱", "🫪", "🥴", "😵\u200d💫", "😵")
 DENIED = "⛔ <b>Access Denied</b>"
+EDITBUG_USAGE = ("✏️ <b>How to edit a bug</b>\n"
+                 "<code>/editbug 3 the new text</code>\n"
+                 "or reply <code>/editbug 3</code> to a message to use its text.\n"
+                 "Bug numbers are in /bugs.")
 OFFLINE = "😴 I was offline when you sent this, here you go:"
 STALE_AFTER = 120     # seconds; an older command was queued by Telegram while the bot was down
 NO_ARGS = {"notes", "changelog", "cmds", "status", "ping"}
@@ -206,6 +210,7 @@ class Bot:
         self.latest = {d: v if isinstance(v, list) else [v] for d, v in self.latest.items()}
         self.last_pin = None
         self.me = self.api("getMe")["username"]
+        self.title = self.api("getChat", chat_id=self.group).get("title", "the group")
 
     def api(self, method, files=None, http_timeout=60, **params):
         url = f"https://api.telegram.org/bot{self.token}/{method}"
@@ -491,32 +496,17 @@ class Bot:
         self.cmd_notes(chat, mid, rest, owner, msg)
 
     def notes_text(self, owner, admin):
-        """Members: one plain list. Admins: Everyone + Admins sections. Owner (PM only): + Owner."""
-        custom = lambda access: [f"/{n}" for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
-        everyone = ["/notes – this list", "/builds [lemonade|lemonadep] – newest release post",
-                    "/changelog – changelog", "/bug &lt;what's wrong&gt; – report a bug (or reply /bug to a message)",
-                    "/bugs – open bugs", "/editbug &lt;id&gt; &lt;new text&gt; – fix your own bug report",
-                    "/ping – is the bot up?",
-                    "/cmds – custom commands", *custom("public")]
-        if not admin:
-            return "\n".join(everyone)
-        lines = ["👥 <b>Everyone</b>", *everyone, "", "🛡 <b>Admins</b>", *(custom("admin") or ["(no admin commands yet)"])]
+        """Command list in the style of Rose's /notes: names only, admin/owner ones in their own block."""
+        custom = lambda access: [n for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
+        block = lambda names: [f" - /{n}" for n in names]
+        lines = [f"List of commands in {html.escape(self.title)}:",
+                 *block(["builds", "bug", "bugs", "editbug", "changelog", "ping", "cmds", "notes", *custom("public")])]
+        if admin and custom("admin"):
+            lines += ["", "[Admin only]", *block(custom("admin"))]
         if owner:
-            lines += ["", "👑 <b>Owner</b>",
-                      "/status – Pi health",
-                      "/sh &lt;cmd&gt; – shell on the Pi",
-                      "/post [args] – tg_post.sh --dry-run",
-                      "/post! [args] – tg_post.sh, send for real",
-                      "/setbuild [device] – reply to a release post: /builds shows it",
-                      "/update – pull the newest bot code, self-test, restart",
-                      "/bugs all – open and resolved bugs",
-                      "/resolve &lt;id…&gt; – mark bugs resolved, tells the reporter",
-                      "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption]",
-                      "    files the command leaves in $OUT are posted, its output never",
-                      "    text: $OUT/tg_message.txt (HTML or *Markdown*), else the ## caption ($1, $(date)… per run)",
-                      "/delcmd &lt;name&gt;",
-                      *custom("owner")]
-        return "\n".join(lines)
+            lines += ["", "[Owner only]", *block(["status", "sh", "post", "post!", "setbuild", "update", "bugs all",
+                                                  "resolve", "addcmd", "delcmd", *custom("owner")])]
+        return "\n".join(lines + ["", "You can run these by tapping them, or by typing /command"])
 
     def cmd_notes(self, chat, mid, rest, owner, msg):
         # in the group the owner gets the admin view; the full list only in the owner's PM
@@ -597,9 +587,11 @@ class Bot:
         num, _, text = rest.partition(" ")
         reply = msg.get("reply_to_message") or {}
         text = text.strip() or reply.get("text") or reply.get("caption") or ""
-        b = self.bugs.get(int(num.lstrip("#"))) if num.lstrip("#").isdigit() else None
-        if not b or not text.strip():
-            return self.meh(chat, mid, "usage: /editbug <id> <new text>, or reply /editbug <id> to a message")
+        if not num.lstrip("#").isdigit() or not text.strip():
+            return self.say(chat, EDITBUG_USAGE, mid)
+        b = self.bugs.get(int(num.lstrip("#")))
+        if not b:
+            return self.say(chat, f"No open bug <b>#{html.escape(num.lstrip('#'))}</b>. See /bugs for the numbers.", mid)
         uid = msg.get("from", {}).get("id")
         if not (owner or ("sender_chat" not in msg and uid == b.get("uid")) or self.is_admin(msg)):
             return self.say(chat, DENIED, mid)
@@ -732,7 +724,7 @@ def selftest():
         assert r.remove("hello") is None and r.remove("hello")
         # /notes and /cmds: each role sees exactly what it may run, in the group and in a PM alike
         b = Bot.__new__(Bot)
-        b.group, b.me, b.reg, out = -100, "axbot", Registry(os.path.join(d, "h.json")), []
+        b.group, b.me, b.title, b.reg, out = -100, "axbot", "Axion & co", Registry(os.path.join(d, "h.json")), []
         for n, acc in (("pub", "public"), ("adm", "admin"), ("own", "owner")):
             b.reg.add(n, acc, "true")
         b.say = lambda chat, text, reply=None, pre=False: out.append((chat, text))
@@ -748,7 +740,7 @@ def selftest():
                 assert {c for c in ("/pub", "/adm", "/own") if c in out[0][1]} == sees, (owner, chat, out)
                 assert ("/sh" in out[0][1]) == (chat == 7 and cmd == b.cmd_notes), out
                 assert ("<code>" in out[0][1]) == (chat == 7 and cmd == b.cmd_cmds), out
-                assert ("Admins" in out[0][1]) == (admin and cmd == b.cmd_notes), out
+                assert ("[Admin only]" in out[0][1]) == (admin and cmd == b.cmd_notes), out
         # denied vs unknown, through handle()
         b.owner, b.reg.cmds["own"]["cmd"] = 7, "true"
         b.is_admin = lambda msg: msg["from"]["id"] == 6
@@ -807,7 +799,8 @@ def selftest():
         assert b.bugs.get(1)["text"] == "camera crash at 4K60"
         assert send(6, "/editbug #1", reply_to_message={"message_id": 3, "text": "by admin"})[0].startswith("✏️")
         assert send(8, "/editbug 1 hijack") == [DENIED] and b.bugs.get(1)["text"] == "by admin"
-        assert send(5, "/editbug 1") == ["MEH"] and send(5, "/editbug 99 x") == ["MEH"] and send(5, "/editbug x y") == ["MEH"]
+        assert send(5, "/editbug 1") == [EDITBUG_USAGE] and send(5, "/editbug x y") == [EDITBUG_USAGE]
+        assert send(5, "/editbug") == [EDITBUG_USAGE] and send(5, "/editbug 99 x")[0].startswith("No open bug <b>#99")
         assert send(5, "/reopen 1") == []      # removed
         o = send(7, "/resolve #1, 9 1")
         assert o[0] == "✅ Bug <b>#1</b> resolved" and out[0][0] == -100 and "Resolved #1" in o[1] and "#9" in o[1], o
@@ -815,7 +808,7 @@ def selftest():
         assert "Skipped, no open bug: #1" in send(7, "/resolve 1")[0]
         assert [x["id"] for x in load_json(BUGS, {})["bugs"]] == [2]                 # open file: open only
         assert [x["id"] for x in load_json(BUGS.replace(".json", "-resolved.json"), [])] == [1]
-        assert send(5, "/editbug 1 too late") == ["MEH"]                              # resolved: not editable
+        assert send(5, "/editbug 1 too late")[0].startswith("No open bug <b>#1")                              # resolved: not editable
         assert send(7, "/resolve") == ["MEH"] and send(7, "/resolve one") == ["MEH"]
         assert BugBook(BUGS).d["next"] == 3 and bug_ids("3 #5,7") == [3, 5, 7] and bug_ids("3 x") is None
         b.started = time.time() - 90061

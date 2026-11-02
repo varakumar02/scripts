@@ -22,11 +22,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.expanduser("~/.config/axbot/commands.json")
 LATEST = os.path.expanduser("~/.config/axbot/latest.json")
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
+LOGS = os.path.expanduser("~/.cache/axbot/logs")
 RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "caption"}
 BUILTIN_PUBLIC = {"start", "help", "builds", "changelog", "cmds"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
@@ -104,7 +105,17 @@ class Registry:
             return "access must be public or owner"
         if not line:
             return "empty command line"
-        self.cmds[name] = {"access": access, "cmd": line}
+        self.cmds[name] = {**self.cmds.get(name, {}), "access": access, "cmd": line}
+        self.save()
+
+    def set_caption(self, name, text):
+        if name not in self.cmds:
+            return "no such command"
+        if len(text) > 1024:
+            return "caption over 1024 characters (Telegram limit)"
+        self.cmds[name]["caption"] = text
+        if not text:
+            del self.cmds[name]["caption"]
         self.save()
 
     def remove(self, name):
@@ -238,7 +249,9 @@ class Bot:
         if name in NO_ARGS and rest:
             return self.meh(chat, mid)
         if custom:
-            return self.spawn(chat, mid, ["bash", "-c", custom["cmd"], name, *split_args(rest)])
+            who = f"{msg.get('from', {}).get('id')} (@{msg.get('from', {}).get('username')})"
+            return threading.Thread(target=self.run_custom, daemon=True,
+                                    args=(chat, mid, name, custom, split_args(rest), who)).start()
         try:
             getattr(self, "cmd_" + name.replace("!", "_now"))(chat, mid, rest, owner)
         except Exception as e:
@@ -254,15 +267,25 @@ class Bot:
     def spawn(self, chat, mid, argv, cwd=None):
         threading.Thread(target=self.execute, args=(chat, mid, argv, cwd), daemon=True).start()
 
-    def execute(self, chat, mid, argv, cwd=None):
+    def run_argv(self, argv, cwd):
+        """Run argv with a fresh $OUT dir -> (ok, combined output text, out dir)."""
         out = os.path.join(RUNS, time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
         os.makedirs(out)
         try:
             p = subprocess.run(argv, cwd=cwd or out, env={**os.environ, "OUT": out}, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=TIMEOUT)
-            text = p.stdout.decode(errors="replace") + ("" if p.returncode == 0 else f"\n[exit {p.returncode}]")
+            ok, text = p.returncode == 0, p.stdout.decode(errors="replace") + ("" if p.returncode == 0 else f"\n[exit {p.returncode}]")
         except subprocess.TimeoutExpired as e:
-            text = (e.stdout or b"").decode(errors="replace") + f"\n[killed after {TIMEOUT}s]"
+            ok, text = False, (e.stdout or b"").decode(errors="replace") + f"\n[killed after {TIMEOUT}s]"
+        return ok, text, out
+
+    def send_file(self, chat, path, reply=None, caption=None):
+        self.api("sendDocument", files={"document": path}, http_timeout=600, chat_id=chat, caption=caption,
+                 reply_to_message_id=reply, allow_sending_without_reply="true")
+
+    def execute(self, chat, mid, argv, cwd=None):
+        """Owner built-ins (/sh /status /post): output and files go back to the chat."""
+        _, text, out = self.run_argv(argv, cwd)
         self.say(chat, text, mid, pre=True)
         keep = False
         for root, _, names in os.walk(out):
@@ -273,12 +296,44 @@ class Bot:
                     self.say(chat, f"{html.escape(n)}: over 50 MB, left on the Pi at <code>{html.escape(f)}</code>", mid)
                     continue
                 try:
-                    self.api("sendDocument", files={"document": f}, http_timeout=600, chat_id=chat, reply_to_message_id=mid,
-                             allow_sending_without_reply="true")
+                    self.send_file(chat, f, mid)
                 except Exception as e:
                     self.say(chat, f"upload {html.escape(n)} failed: {html.escape(str(e))}", mid)
         if not keep:
             shutil.rmtree(out, ignore_errors=True)
+
+    def run_custom(self, chat, mid, name, cmd, args, who):
+        """Custom command: only the files in $OUT are posted (with the command's caption), never the
+        output. Any failure -> "Failed to retrieve" in the chat, full log as a file to the owner's PM."""
+        ok, text, out = self.run_argv(["bash", "-c", cmd["cmd"], name, *args], None)
+        files = sorted(os.path.join(r, n) for r, _, ns in os.walk(out) for n in ns)
+        problem = None if ok else "command failed"
+        if ok and not files:
+            problem = "finished but left no file in $OUT"
+        big = [f for f in files if os.path.getsize(f) > MAX_UPLOAD]
+        if ok and big:
+            problem = "over 50 MB, left on the Pi: " + ", ".join(big)
+        if not problem:
+            for f in files:
+                try:
+                    self.send_file(chat, f, mid, cmd.get("caption"))
+                except Exception as e:
+                    problem = f"upload {os.path.basename(f)} failed: {e}"
+                    break
+        if not big:
+            shutil.rmtree(out, ignore_errors=True)
+        if not problem:
+            return
+        self.say(chat, "Failed to retrieve", mid)
+        os.makedirs(LOGS, exist_ok=True)
+        log = os.path.join(LOGS, f"{name}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}.log")
+        with open(log, "w") as fh:
+            fh.write(f"command: /{name} {shlex.join(args)}\nby: {who}\nchat: {chat}\nline: {cmd['cmd']}\n"
+                     f"problem: {problem}\n\n--- output ---\n{text}")
+        try:
+            self.send_file(self.owner, log, caption=f"/{name} failed: {problem}"[:1024])
+        except Exception as e:
+            print(f"failure log {log} not sent to owner: {e}", file=sys.stderr, flush=True)
 
     # -- built-ins (public)
 
@@ -292,6 +347,7 @@ class Bot:
             lines += ["", "owner:", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
                       "/addcmd &lt;name&gt; &lt;public|owner&gt; &lt;command line&gt; – files written to $OUT are sent back",
+                      "/caption &lt;name&gt; [text] – text posted with that command's files (empty = remove)",
                       "/delcmd &lt;name&gt;"]
         self.say(chat, "\n".join(lines), mid)
 
@@ -318,6 +374,7 @@ class Bot:
 
     def cmd_cmds(self, chat, mid, rest, owner):
         rows = [f"/{n} – {c['access']}" + (f": <code>{html.escape(c['cmd'])}</code>" if owner else "")
+                + (f"\n    caption: {html.escape(c['caption'])}" if owner and c.get("caption") else "")
                 for n, c in sorted(self.reg.cmds.items()) if owner or c["access"] == "public"]
         self.say(chat, "\n".join(rows) or "no custom commands.", mid)
 
@@ -342,6 +399,11 @@ class Bot:
         parts = rest.split(None, 2)
         err = self.reg.add(*(parts + [""] * (3 - len(parts)))) if len(parts) >= 2 else "usage: /addcmd <name> <public|owner> <command line>"
         self.meh(chat, mid, err) if err else self.say(chat, f"added /{parts[0]} ({parts[1]})", mid)
+
+    def cmd_caption(self, chat, mid, rest, owner):
+        name, _, text = rest.partition(" ")
+        err = self.reg.set_caption(name, text.strip()) if name else "usage: /caption <name> [text]  (no text = remove)"
+        self.meh(chat, mid, err) if err else self.say(chat, f"caption for /{name} " + ("set" if text.strip() else "removed"), mid)
 
     def cmd_delcmd(self, chat, mid, rest, owner):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
@@ -372,7 +434,27 @@ def selftest():
         assert r.add("hello", "public", "echo hi") is None
         assert r.add("sh", "public", "x") and r.add("Bad-Name", "public", "x") and r.add("ok", "root", "x")
         assert Registry(r.path).cmds == {"hello": {"access": "public", "cmd": "echo hi"}}
+        assert r.set_caption("hello", "Here you go") is None and r.cmds["hello"]["caption"] == "Here you go"
+        assert r.add("hello", "owner", "echo bye") is None and r.cmds["hello"]["caption"] == "Here you go"
+        assert r.set_caption("hello", "") is None and "caption" not in r.cmds["hello"]
+        assert r.set_caption("nope", "x") and r.set_caption("hello", "x" * 1025)
         assert r.remove("hello") is None and r.remove("hello")
+        # custom command runner, Telegram stubbed out
+        global RUNS, LOGS
+        RUNS, LOGS = os.path.join(d, "runs"), os.path.join(d, "logs")
+        b = Bot.__new__(Bot)
+        b.owner, sent, said = 7, [], []
+        b.send_file = lambda chat, path, reply=None, caption=None: sent.append((chat, os.path.basename(path), caption, open(path).read()))
+        b.say = lambda chat, text, reply=None, pre=False: said.append(text)
+        b.run_custom(-100, 1, "t", {"cmd": 'echo noise; echo "$1" > "$OUT/r.txt"', "caption": "cap"}, ["hi"], "u")
+        assert sent == [(-100, "r.txt", "cap", "hi\n")] and said == [], (sent, said)
+        for line in ("echo boom; exit 3", "echo done"):          # failing command / no file left
+            sent.clear(); said.clear()
+            b.run_custom(-100, 1, "t", {"cmd": line}, [], "u")
+            assert said == ["Failed to retrieve"] and len(sent) == 1 and sent[0][0] == 7, (sent, said)
+        logs = [open(os.path.join(LOGS, n)).read() for n in os.listdir(LOGS)]
+        assert len(logs) == 2 and any("boom" in t and "[exit 3]" in t for t in logs)
+        assert not os.listdir(RUNS)
     # argv form keeps chat args out of the command line
     p = subprocess.run(["bash", "-c", 'printf "%s|" "$@"', "n", "$(id)", "; rm -rf /"], capture_output=True, text=True)
     assert p.stdout == "$(id)|; rm -rf /|", p.stdout

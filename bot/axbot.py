@@ -69,6 +69,11 @@ MEH = ("😑", "👍", "😒", "😫", "😩", "🫨", "😬", "🥱", "🫪", "
 NO_ARGS = {"help", "changelog", "cmds", "status"}
 
 
+def tg_len(text):
+    """Length as Telegram counts a parse_mode=HTML caption: tags dropped, entities decoded, UTF-16 units."""
+    return len(html.unescape(re.sub(r"<[^>]+>", "", text)).encode("utf-16-le")) // 2
+
+
 def chat_allowed(chat_id, group_id, owner_id):
     return chat_id in (group_id, owner_id)
 
@@ -272,11 +277,11 @@ class Bot:
         threading.Thread(target=self.execute, args=(chat, mid, argv, cwd), daemon=True).start()
 
     def run_argv(self, argv, cwd):
-        """Run argv with a fresh $OUT dir (and $CAPTION, a file path beside it) -> (ok, output text, out dir)."""
+        """Run argv with a fresh $OUT dir -> (ok, output text, out dir)."""
         out = os.path.join(RUNS, time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
         os.makedirs(out)
         try:
-            p = subprocess.run(argv, cwd=cwd or out, env={**os.environ, "OUT": out, "CAPTION": out + ".caption"}, stdin=subprocess.DEVNULL,
+            p = subprocess.run(argv, cwd=cwd or out, env={**os.environ, "OUT": out}, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=TIMEOUT)
             ok, text = p.returncode == 0, p.stdout.decode(errors="replace") + ("" if p.returncode == 0 else f"\n[exit {p.returncode}]")
         except subprocess.TimeoutExpired as e:
@@ -286,6 +291,16 @@ class Bot:
     def send_file(self, chat, path, reply=None, caption=None):
         self.api("sendDocument", files={"document": path}, http_timeout=600, chat_id=chat, caption=caption,
                  reply_to_message_id=reply, allow_sending_without_reply="true")
+
+    def send_html(self, method, field, text, **kw):
+        """sendMessage/sendDocument with `field` as HTML; Telegram rejects broken HTML outright, so
+        retry it as plain text rather than lose the post."""
+        try:
+            return self.api(method, **kw, **{field: text, "parse_mode": "HTML"})
+        except RuntimeError as e:
+            if "parse entities" not in str(e):
+                raise
+            return self.api(method, **kw, **{field: text})
 
     def execute(self, chat, mid, argv, cwd=None):
         """Owner built-ins (/sh /status /post): output and files go back to the chat."""
@@ -307,14 +322,15 @@ class Bot:
             shutil.rmtree(out, ignore_errors=True)
 
     def run_custom(self, chat, mid, name, cmd, args, who):
-        """Custom command: only the files in $OUT are posted, never the output. Caption: what the script
-        wrote to $CAPTION, else the /addcmd "## ..." template expanded now. Any failure -> "Failed to
-        retrieve" in the chat, full log as a file to the owner's PM."""
+        """Custom command: only $OUT is posted, never the output. $OUT/tg_message.txt (HTML) is the post
+        text, else the /addcmd "## ..." template expanded now; the other files go out with it, and with
+        no other file the text is posted alone. Any failure -> "Failed to retrieve" in the chat, full
+        log as a file to the owner's PM."""
         ok, text, out = self.run_argv(["bash", "-c", cmd["cmd"], name, *args], None)
         caption = None
         try:
-            caption = open(out + ".caption").read().strip()
-            os.remove(out + ".caption")
+            caption = open(os.path.join(out, "tg_message.txt"), errors="replace").read().strip()
+            os.remove(os.path.join(out, "tg_message.txt"))
         except FileNotFoundError:
             pass
         if ok and not caption and cmd.get("caption"):
@@ -324,18 +340,24 @@ class Bot:
             caption = p.stdout.strip()
         files = sorted(os.path.join(r, n) for r, _, ns in os.walk(out) for n in ns)
         problem = None if ok else "command failed"
-        if ok and not files:
+        if ok and not files and not caption:
             problem = "finished but left no file in $OUT"
         big = [f for f in files if os.path.getsize(f) > MAX_UPLOAD]
         if ok and big:
             problem = "over 50 MB, left on the Pi: " + ", ".join(big)
         if not problem:
-            for f in files:
-                try:
-                    self.send_file(chat, f, mid, (caption or None) and caption[:1024])
-                except Exception as e:
-                    problem = f"upload {os.path.basename(f)} failed: {e}"
-                    break
+            try:
+                # caption limit is 1024 as Telegram counts it (parsed text, UTF-16); longer -> own message
+                if caption and (not files or tg_len(caption) > 1024):
+                    self.send_html("sendMessage", "text", caption[:4096], chat_id=chat,
+                                   reply_to_message_id=mid, allow_sending_without_reply="true",
+                                   disable_web_page_preview="true")
+                    caption = None
+                for f in files:
+                    self.send_html("sendDocument", "caption", caption, files={"document": f}, http_timeout=600,
+                                   chat_id=chat, reply_to_message_id=mid, allow_sending_without_reply="true")
+            except Exception as e:
+                problem = f"posting failed: {e}"
         if not big:
             shutil.rmtree(out, ignore_errors=True)
         if not problem:
@@ -363,7 +385,7 @@ class Bot:
             lines += ["", "owner:", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
-                      "caption = what the script writes to $CAPTION, else the ## text expanded each run ($1, $(date)…)",
+                      "post text = $OUT/tg_message.txt (HTML) if the script wrote one, else the ## text expanded each run ($1, $(date)…)",
                       "/delcmd &lt;name&gt;"]
         self.say(chat, "\n".join(lines), mid)
 
@@ -466,22 +488,35 @@ def selftest():
         global RUNS, LOGS
         RUNS, LOGS = os.path.join(d, "runs"), os.path.join(d, "logs")
         b = Bot.__new__(Bot)
-        b.owner, sent, said = 7, [], []
-        b.send_file = lambda chat, path, reply=None, caption=None: sent.append((chat, os.path.basename(path), caption, open(path).read()))
-        b.say = lambda chat, text, reply=None, pre=False: said.append(text)
+        b.owner, calls = 7, []
+
+        def api(method, files=None, **kw):
+            if kw.get("parse_mode") and "<bad" in (kw.get("text") or kw.get("caption") or ""):
+                raise RuntimeError("Bad Request: can't parse entities")
+            f = files and files["document"]
+            calls.append((method, kw.get("chat_id"), f and os.path.basename(f), f and open(f).read(),
+                          kw.get("caption") or kw.get("text"), kw.get("parse_mode")))
+        b.api = api
+        b.say = lambda chat, text, reply=None, pre=False: calls.append(("say", chat, text))
         mk = 'echo noise; echo "$1" > "$OUT/r.txt"'
         b.run_custom(-100, 1, "t", {"cmd": mk, "caption": "for $1: $(ls) \"q\""}, ["$(id)"], "u")
-        assert sent == [(-100, "r.txt", 'for $(id): r.txt "q"', "$(id)\n")] and said == [], (sent, said)
-        sent.clear()      # script-written $CAPTION wins over the template
-        b.run_custom(-100, 1, "t", {"cmd": mk + '; echo "made $1" > "$CAPTION"', "caption": "tmpl"}, ["x"], "u")
-        assert sent[0][2] == "made x" and not os.listdir(RUNS), sent
-        sent.clear()
+        assert calls == [("sendDocument", -100, "r.txt", "$(id)\n", 'for $(id): r.txt "q"', "HTML")], calls
+        calls.clear()     # $OUT/tg_message.txt wins over the template and is not uploaded itself
+        b.run_custom(-100, 1, "t", {"cmd": mk + '; echo "<b>made $1</b>" > tg_message.txt', "caption": "tmpl"}, ["x"], "u")
+        assert calls == [("sendDocument", -100, "r.txt", "x\n", "<b>made x</b>", "HTML")] and not os.listdir(RUNS), calls
+        calls.clear()     # text only -> one message; broken HTML -> sent plain
+        b.run_custom(-100, 1, "t", {"cmd": 'echo "<bad html" > "$OUT/tg_message.txt"'}, [], "u")
+        assert calls == [("sendMessage", -100, None, None, "<bad html", None)], calls
+        calls.clear()     # caption over 1024 -> message first, then the file uncaptioned
+        b.run_custom(-100, 1, "t", {"cmd": mk + '; printf "%02000d" 0 > tg_message.txt'}, ["x"], "u")
+        assert [c[0] for c in calls] == ["sendMessage", "sendDocument"] and calls[1][4] is None, calls
+        calls.clear()
         b.run_custom(-100, 1, "t", {"cmd": mk}, ["x"], "u")
-        assert sent[0][2] is None, sent
+        assert calls[0][4] is None, calls
         for line in ("echo boom; exit 3", "echo done"):          # failing command / no file left
-            sent.clear(); said.clear()
+            calls.clear()
             b.run_custom(-100, 1, "t", {"cmd": line}, [], "u")
-            assert said == ["Failed to retrieve"] and len(sent) == 1 and sent[0][0] == 7, (sent, said)
+            assert calls[0] == ("say", -100, "Failed to retrieve") and calls[1][:2] == ("sendDocument", 7), calls
         logs = [open(os.path.join(LOGS, n)).read() for n in os.listdir(LOGS)]
         assert len(logs) == 2 and any("boom" in t and "[exit 3]" in t for t in logs)
         assert not os.listdir(RUNS)

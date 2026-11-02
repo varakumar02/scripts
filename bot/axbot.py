@@ -29,8 +29,8 @@ KEEP_POSTS = 3        # release posts remembered per device, so a deleted one fa
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve", "reopen"}
-BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve"}
+BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs", "editbug"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
@@ -148,8 +148,8 @@ class BugBook:
         json.dump(self.d, open(self.path + ".tmp", "w"), indent=1)
         os.replace(self.path + ".tmp", self.path)
 
-    def add(self, text, by, chat, msg):
-        b = {"id": self.d["next"], "text": text, "by": by, "chat": chat, "msg": msg,
+    def add(self, text, by, uid, chat, msg):
+        b = {"id": self.d["next"], "text": text, "by": by, "uid": uid, "chat": chat, "msg": msg,
              "date": int(time.time()), "resolved": None}
         self.d["next"] += 1
         self.d["bugs"].append(b)
@@ -162,15 +162,15 @@ class BugBook:
     def listed(self, resolved):
         return [b for b in self.d["bugs"] if resolved or not b["resolved"]]
 
-    def set_resolved(self, ids, on):
-        """-> (changed bugs, [ids that were unknown or already in that state])"""
+    def resolve(self, ids):
+        """-> (resolved bugs, [ids that were unknown or already resolved]). Ids are never reused."""
         changed, skipped = [], []
         for i in ids:
             b = self.get(i)
-            if not b or bool(b["resolved"]) == on:
+            if not b or b["resolved"]:
                 skipped.append(i)
                 continue
-            b["resolved"] = int(time.time()) if on else None
+            b["resolved"] = int(time.time())
             changed.append(b)
         if changed:
             self.save()
@@ -472,7 +472,8 @@ class Bot:
         custom = lambda access: [f"/{n}" for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
         everyone = ["/notes – this list", "/builds [lemonade|lemonadep] – newest release post",
                     "/changelog – changelog", "/bug &lt;what's wrong&gt; – report a bug (or reply /bug to a message)",
-                    "/bugs – open bugs · /bugs &lt;id&gt; – one bug in full", "/ping – is the bot up?",
+                    "/bugs – open bugs", "/editbug &lt;id&gt; &lt;new text&gt; – fix your own bug report",
+                    "/ping – is the bot up?",
                     "/cmds – custom commands", *custom("public")]
         if not admin:
             return "\n".join(everyone)
@@ -486,7 +487,7 @@ class Bot:
                       "/setbuild [device] – reply to a release post: /builds shows it",
                       "/update – pull the newest bot code, self-test, restart",
                       "/bugs all – open and resolved bugs",
-                      "/resolve &lt;id…&gt; – mark bugs resolved, tells the reporter · /reopen &lt;id…&gt; – undo",
+                      "/resolve &lt;id…&gt; – mark bugs resolved, tells the reporter",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption]",
                       "    files the command leaves in $OUT are posted, its output never",
                       "    text: $OUT/tg_message.txt (HTML or *Markdown*), else the ## caption ($1, $(date)… per run)",
@@ -540,13 +541,11 @@ class Bot:
             return self.meh(chat, mid, "usage: /bug <what's wrong>, or reply /bug to a message")
         f = msg.get("from", {})
         by = "@" + f["username"] if f.get("username") else f.get("first_name", "someone")
-        b = self.bugs.add(text.strip()[:1000], by, chat, mid)
+        b = self.bugs.add(text.strip()[:1000], by, f.get("id"), chat, mid)
         self.say(chat, f"🐞 Logged as bug <b>#{b['id']}</b>. Thanks!", mid)
 
-    def bug_line(self, b, full=False):
-        text = b["text"] if full else (b["text"][:80] + "…" if len(b["text"]) > 80 else b["text"])
-        mark = "✅" if b["resolved"] else "🐞"
-        return f"{mark} <b>#{b['id']}</b> {html.escape(text)} — {html.escape(b['by'])}"
+    def bug_line(self, b):
+        return f"{'✅' if b['resolved'] else '🐞'} <b>#{b['id']}</b> {html.escape(b['text'])} — {html.escape(b['by'])}"
 
     def cmd_bugs(self, chat, mid, rest, owner, msg):
         if rest.lower() == "all":
@@ -554,13 +553,7 @@ class Bot:
                 return self.say(chat, DENIED, mid)
             bugs, title = self.bugs.listed(True), "All bugs"
         elif rest:
-            ids = bug_ids(rest)
-            b = ids and len(ids) == 1 and self.bugs.get(ids[0])
-            if not b:
-                return self.meh(chat, mid, "no such bug")
-            when = time.strftime("%Y-%m-%d", time.gmtime(b["date"]))
-            state = f"resolved {time.strftime('%Y-%m-%d', time.gmtime(b['resolved']))}" if b["resolved"] else "open"
-            return self.say(chat, f"{self.bug_line(b, True)}\n<i>reported {when} · {state}</i>", mid)
+            return self.meh(chat, mid, "usage: /bugs, or /bugs all")
         else:
             bugs, title = self.bugs.listed(False), "Open bugs"
         if not bugs:
@@ -574,6 +567,21 @@ class Bot:
         if shown < len(lines):
             text += f"…and {len(lines) - shown} older"
         self.say(chat, text, mid)
+
+    def cmd_editbug(self, chat, mid, rest, owner, msg):
+        """Reporter, admins and owner may rewrite a bug: /editbug <id> <text>, or as a reply (its text)."""
+        num, _, text = rest.partition(" ")
+        reply = msg.get("reply_to_message") or {}
+        text = text.strip() or reply.get("text") or reply.get("caption") or ""
+        b = self.bugs.get(int(num.lstrip("#"))) if num.lstrip("#").isdigit() else None
+        if not b or not text.strip():
+            return self.meh(chat, mid, "usage: /editbug <id> <new text>, or reply /editbug <id> to a message")
+        uid = msg.get("from", {}).get("id")
+        if not (owner or ("sender_chat" not in msg and uid == b.get("uid")) or self.is_admin(msg)):
+            return self.say(chat, DENIED, mid)
+        b["text"] = text.strip()[:1000]
+        self.bugs.save()
+        self.say(chat, f"✏️ Bug <b>#{b['id']}</b> updated:\n{self.bug_line(b)}", mid)
 
     def cmd_changelog(self, chat, mid, rest, owner, msg):
         try:
@@ -650,21 +658,17 @@ class Bot:
         self.api("getUpdates", offset=self.offset, timeout=0)    # confirm this /update, or it runs again
         os._exit(0)
 
-    def cmd_resolve(self, chat, mid, rest, owner, msg, on=True):
+    def cmd_resolve(self, chat, mid, rest, owner, msg):
         ids = bug_ids(rest)
         if not ids:
-            return self.meh(chat, mid, f"usage: /{'resolve' if on else 'reopen'} <id> [id…]")
-        changed, skipped = self.bugs.set_resolved(ids, on)
-        for b in changed if on else []:                             # tell the reporter, under their report
+            return self.meh(chat, mid, "usage: /resolve <id> [id…]")
+        changed, skipped = self.bugs.resolve(ids)
+        for b in changed:                                           # tell the reporter, under their report
             self.say(b["chat"], f"✅ Bug <b>#{b['id']}</b> is resolved.", b["msg"])
-        out = (f"{'✅ Resolved' if on else '🐞 Reopened'}: " + ", ".join(f"#{b['id']}" for b in changed)) if changed else ""
+        out = ("✅ Resolved: " + ", ".join(f"#{b['id']}" for b in changed)) if changed else ""
         if skipped:
-            out += ("\n" if out else "") + "😬 skipped (unknown or already " + ("resolved" if on else "open") + "): " \
-                   + ", ".join(f"#{i}" for i in skipped)
+            out += ("\n" if out else "") + "😬 skipped (unknown or already resolved): " + ", ".join(f"#{i}" for i in skipped)
         self.say(chat, out, mid)
-
-    def cmd_reopen(self, chat, mid, rest, owner, msg):
-        self.cmd_resolve(chat, mid, rest, owner, msg, on=False)
 
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
@@ -758,7 +762,7 @@ def selftest():
                                   "date": int(time.time()) - age, "text": text}})
             assert [t for _, t in out] == want, (age, text, out)
         del b.cmd_notes
-        # bugs: file, list, one in full, owner-only all/resolve/reopen, reporter told on resolve
+        # bugs: file, list, edit (reporter/admin/owner), owner-only all/resolve, reporter told on resolve
         global BUGS
         BUGS = os.path.join(d, "bugs.json")
         b.bugs, b.meh = BugBook(BUGS), lambda chat, mid, why=None: out.append((chat, "MEH"))
@@ -772,12 +776,18 @@ def selftest():
         assert send(5, "/bug") == ["MEH"] and send(5, "/bug   ") == ["MEH"]
         o = send(5, "/bugs")[0]
         assert "#2</b> wifi drops — @u6" in o and "camera &lt;b&gt;crash" in o and o.index("#2") < o.index("#1"), o
-        assert send(5, "/bugs all") == [DENIED] and send(5, "/resolve 1") == [DENIED] and send(6, "/reopen 1") == [DENIED]
+        assert send(5, "/bugs all") == [DENIED] and send(5, "/resolve 1") == [DENIED] and send(5, "/bugs 1") == ["MEH"]
+        b.is_admin = lambda msg: msg.get("from", {}).get("id") == 6
+        assert send(5, "/editbug 1 camera crash at 4K60")[0].startswith("✏️ Bug <b>#1</b> updated")
+        assert b.bugs.get(1)["text"] == "camera crash at 4K60"
+        assert send(6, "/editbug #1", reply_to_message={"message_id": 3, "text": "by admin"})[0].startswith("✏️")
+        assert send(8, "/editbug 1 hijack") == [DENIED] and b.bugs.get(1)["text"] == "by admin"
+        assert send(5, "/editbug 1") == ["MEH"] and send(5, "/editbug 99 x") == ["MEH"] and send(5, "/editbug x y") == ["MEH"]
+        assert send(5, "/reopen 1") == []      # removed
         o = send(7, "/resolve #1, 9 1")
         assert o[0] == "✅ Bug <b>#1</b> is resolved." and out[0][0] == -100 and "Resolved: #1" in o[1] and "#9" in o[1], o
         assert "#1" not in send(5, "/bugs")[0] and "#1" in send(7, "/bugs all")[0]
-        assert "resolved" in send(5, "/bugs 1")[0] and send(5, "/bugs 99") == ["MEH"] and send(5, "/bugs x y") == ["MEH"]
-        assert "Reopened: #1" in send(7, "/reopen 1")[0] and "#1" in send(5, "/bugs")[0]
+        assert "already resolved): #1" in send(7, "/resolve 1")[0]
         assert send(7, "/resolve") == ["MEH"] and send(7, "/resolve one") == ["MEH"]
         assert BugBook(BUGS).d["next"] == 3 and bug_ids("3 #5,7") == [3, 5, 7] and bug_ids("3 x") is None
         b.started = time.time() - 90061

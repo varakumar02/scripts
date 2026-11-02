@@ -46,14 +46,15 @@ def load_env(path):
 # ---- pure logic (covered by --selftest) -------------------------------------
 
 def parse_command(text, me):
-    """'/cmd@bot a b' -> ('cmd', 'a b'); None if not a command or aimed at another bot."""
-    if not text or not text.startswith("/"):
+    """'/cmd@bot a b' -> ('cmd', 'a b', addressed); None if not a command or aimed at another bot.
+    addressed = the command named this bot explicitly (@me)."""
+    m = re.match(r"/(\S*)\s*(.*)", text or "", re.S)
+    if not m:
         return None
-    head, _, rest = text[1:].partition(" ")
-    name, _, target = head.partition("@")
+    name, _, target = m[1].partition("@")
     if target and target.lower() != me.lower():
         return None
-    return name.lower(), rest.strip()
+    return name.lower(), m[2].strip(), bool(target)
 
 
 def post_device(text):
@@ -62,10 +63,9 @@ def post_device(text):
     return m and m[1]
 
 
-INVALID = ("🍋 <b>{}</b>? Never heard of it. I only squeeze <code>lemonade</code> and <code>lemonadep</code>.",
-           "🤖 Searched every server, two Raspberry Pis and under the sofa: no <b>{}</b>. Try <code>lemonade</code> or <code>lemonadep</code>.",
-           "📵 <b>{}</b> isn't a OnePlus 9 — did your cat walk on the keyboard? <code>/builds lemonade</code> or <code>/builds lemonadep</code>.",
-           "🧃 Wrong flavour! <b>{}</b> is not on the menu. We serve <code>lemonade</code> and <code>lemonadep</code> only.")
+# The whole reply to any wrong command: one of these, at random.
+MEH = ("😑", "👍", "😒", "😫", "😩", "🫨", "😬", "🥱", "🫪", "🥴", "😵\u200d💫", "😵")
+NO_ARGS = {"help", "changelog", "cmds", "status"}
 
 
 def chat_allowed(chat_id, group_id, owner_id):
@@ -222,19 +222,32 @@ class Bot:
         parsed = parse_command(msg.get("text"), self.me)
         if not parsed:
             return
-        name, rest = parsed
+        name, rest, addressed = parsed
         owner = is_owner(msg, self.owner)
         print(f"chat {chat} from {msg.get('from', {}).get('id')}{' (owner)' if owner else ''}: /{name}", flush=True)
         mid = msg["message_id"]
         custom = self.reg.cmds.get(name)
         if name in BUILTIN_OWNER or (custom and custom["access"] == "owner"):
             if not owner:
-                return self.say(chat, "owner only.", mid)
+                return self.meh(chat, mid)
         elif name not in BUILTIN_PUBLIC and not custom:
+            # unknown: answer in PM or when aimed at us; a bare /foo in the group may be another bot's
+            if addressed or msg["chat"]["type"] == "private":
+                self.meh(chat, mid)
             return
+        if name in NO_ARGS and rest:
+            return self.meh(chat, mid)
         if custom:
             return self.spawn(chat, mid, ["bash", "-c", custom["cmd"], name, *split_args(rest)])
-        getattr(self, "cmd_" + name.replace("!", "_now"))(chat, mid, rest, owner)
+        try:
+            getattr(self, "cmd_" + name.replace("!", "_now"))(chat, mid, rest, owner)
+        except Exception as e:
+            print(f"/{name}: {e!r}", file=sys.stderr, flush=True)
+            self.meh(chat, mid, str(e) if owner else None)
+
+    def meh(self, chat, mid, why=None):
+        """Wrong command: a random MEH emoji; the owner also gets the reason."""
+        self.say(chat, random.choice(MEH) + (f" {html.escape(why)}" if why else ""), mid)
 
     # -- running things
 
@@ -283,9 +296,9 @@ class Bot:
         self.say(chat, "\n".join(lines), mid)
 
     def cmd_builds(self, chat, mid, rest, owner):
-        rest = rest.strip().lower()
+        rest = rest.lower()
         if rest and rest not in DEVICES:
-            return self.say(chat, random.choice(INVALID).format(html.escape(rest[:40])), mid)
+            return self.meh(chat, mid)
         self.track_pin()
         for d in [rest] if rest else DEVICES:
             post = self.latest.get(d)
@@ -315,6 +328,8 @@ class Bot:
                                              "systemctl is-active axbot 2>/dev/null"])
 
     def cmd_sh(self, chat, mid, rest, owner):
+        if not rest:
+            return self.meh(chat, mid, "usage: /sh <command>")
         self.spawn(chat, mid, ["bash", "-c", rest], cwd=os.path.expanduser("~"))
 
     def cmd_post(self, chat, mid, rest, owner):
@@ -326,23 +341,25 @@ class Bot:
     def cmd_addcmd(self, chat, mid, rest, owner):
         parts = rest.split(None, 2)
         err = self.reg.add(*(parts + [""] * (3 - len(parts)))) if len(parts) >= 2 else "usage: /addcmd <name> <public|owner> <command line>"
-        self.say(chat, html.escape(err) if err else f"added /{parts[0]} ({parts[1]})", mid)
+        self.meh(chat, mid, err) if err else self.say(chat, f"added /{parts[0]} ({parts[1]})", mid)
 
     def cmd_delcmd(self, chat, mid, rest, owner):
-        err = self.reg.remove(rest.strip())
-        self.say(chat, html.escape(err) if err else f"removed /{rest.strip()}", mid)
+        err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
+        self.meh(chat, mid, err) if err else self.say(chat, f"removed /{rest}", mid)
 
 
 def selftest():
-    assert parse_command("/help", "axbot") == ("help", "")
+    assert parse_command("/help", "axbot") == ("help", "", False)
+    assert parse_command("/builds\nlemonade", "axbot") == ("builds", "lemonade", False)
+    assert parse_command("/", "axbot") == ("", "", False) and parse_command("/@axbot", "axbot") == ("", "", True)
+    assert len(MEH) == 12 and len(set(MEH)) == 12
     assert post_device("for Oneplus 9 Pro (lemonadep)\n#A16 #lemonadep #Axion") == "lemonadep"
     assert post_device("for Oneplus 9 (lemonade)\n#A16 #lemonade #Axion") == "lemonade"
     assert not post_device("rules: no lemonade talk") and not post_device(None)
-    assert all(t.format("x").count("x") for t in INVALID)
-    assert parse_command("/Builds@AxBot lemonadep", "axbot") == ("builds", "lemonadep")
+    assert parse_command("/Builds@AxBot lemonadep", "axbot") == ("builds", "lemonadep", True)
     assert parse_command("/builds@otherbot", "axbot") is None
     assert parse_command("hello", "axbot") is None
-    assert parse_command("/post! --beta", "axbot") == ("post!", "--beta")
+    assert parse_command("/post! --beta", "axbot") == ("post!", "--beta", False)
     assert chat_allowed(-100, -100, 7) and chat_allowed(7, -100, 7) and not chat_allowed(-200, -100, 7)
     assert is_owner({"from": {"id": 7}}, 7)
     assert not is_owner({"from": {"id": 8}}, 7)

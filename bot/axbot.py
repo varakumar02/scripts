@@ -27,7 +27,7 @@ RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild"}
 BUILTIN_PUBLIC = {"start", "help", "builds", "changelog", "cmds"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
@@ -206,12 +206,17 @@ class Bot:
         if not pin or pin["message_id"] == self.last_pin:
             return
         self.last_pin = pin["message_id"]
-        dev = post_device(pin.get("text") or pin.get("caption"))
-        if dev and self.latest.get(dev) != pin["message_id"]:
-            self.latest[dev] = pin["message_id"]
+        self.remember(pin)
+
+    def remember(self, post, dev=None):
+        """Store `post` as its device's newest release post -> device, or None if it names none."""
+        dev = dev or post_device(post.get("text") or post.get("caption"))
+        if dev and self.latest.get(dev) != post["message_id"]:
+            self.latest[dev] = post["message_id"]
             os.makedirs(os.path.dirname(LATEST), exist_ok=True)
             json.dump(self.latest, open(LATEST, "w"))
-            print(f"latest {dev} post: {pin['message_id']}", flush=True)
+            print(f"latest {dev} post: {post['message_id']}", flush=True)
+        return dev
 
     def handle(self, u):
         msg = u.get("message") or u.get("my_chat_member")
@@ -219,7 +224,7 @@ class Bot:
             return
         chat = msg["chat"]["id"]
         private = msg["chat"]["type"] == "private"
-        if not chat_allowed(chat, self.group, self.owner) and not (private and self.in_group(chat)):
+        if not chat_allowed(chat, self.group, self.owner):
             print(f"ignored update from chat {chat} ({msg['chat']['type']})", flush=True)
             if not private:
                 print(f"leaving foreign chat {chat} {msg['chat'].get('title')!r}", flush=True)
@@ -230,6 +235,8 @@ class Bot:
             return
         if "my_chat_member" in u:
             return
+        if "pinned_message" in msg and chat == self.group:     # a person pinned something
+            self.remember(msg["pinned_message"])
         for m in msg.get("new_chat_members", []):
             if not m.get("is_bot"):
                 self.say(chat, f"Welcome, {html.escape(m.get('first_name', ''))}! "
@@ -277,10 +284,6 @@ class Bot:
             return self.api("getChatMember", chat_id=self.group, user_id=uid)["status"]
         except RuntimeError:
             return "left"
-
-    def in_group(self, uid):
-        """PMs are answered for members of our group (and the owner); everyone else is ignored."""
-        return self.group_status(uid) in ("creator", "administrator", "member", "restricted")
 
     def meh(self, chat, mid, why=None):
         """Wrong command: a random MEH emoji; the owner also gets the reason."""
@@ -406,7 +409,8 @@ class Bot:
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
                       "post text = $OUT/tg_message.txt (HTML or *Markdown*) if the script wrote one, else the ## text expanded each run ($1, $(date)…)",
-                      "/delcmd &lt;name&gt;", *custom("owner")]
+                      "/delcmd &lt;name&gt;",
+                      "/setbuild [device] – reply to a release post: /builds shows it for its device", *custom("owner")]
         return "\n".join(lines)
 
     def cmd_help(self, chat, mid, rest, owner, msg):
@@ -468,6 +472,17 @@ class Bot:
         err = (self.reg.add(*(parts + [""] * (3 - len(parts))), caption.strip()) if len(parts) >= 2
                else "usage: /addcmd <name> <public|admin|owner> <command line> [## caption]")
         self.meh(chat, mid, err) if err else self.say(chat, f"added /{parts[0]} ({parts[1]})", mid)
+
+    def cmd_setbuild(self, chat, mid, rest, owner, msg):
+        post = msg.get("reply_to_message")
+        if not post or chat != self.group:
+            return self.meh(chat, mid, "reply /setbuild to a release post in the group")
+        if rest and rest.lower() not in DEVICES:
+            return self.meh(chat, mid, "device must be lemonade or lemonadep")
+        dev = self.remember(post, rest.lower() or None)
+        if not dev:
+            return self.meh(chat, mid, "that post has no #lemonade / #lemonadep tag; add the device: /setbuild lemonade")
+        self.say(chat, f"✅ /builds {dev} now points to this post", post["message_id"])
 
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
@@ -531,6 +546,28 @@ def selftest():
             b.handle({"message": {"message_id": 1, "chat": {"id": -100, "type": "supergroup"},
                                   "from": {"id": uid}, "text": text}})
             assert out == [(-100, want)], (text, out)
+        # release posts: /setbuild by reply, pins by people, device from #tag
+        global LATEST
+        LATEST = os.path.join(d, "latest.json")
+        b.latest, b.me = {}, "axbot"
+        post = {"message_id": 40, "caption": "New build for Oneplus 9 (lemonade)\n#A16 #lemonade #Axion"}
+        out.clear()
+        b.handle({"message": {"message_id": 41, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 7},
+                              "text": "/setbuild", "reply_to_message": post}})
+        assert b.latest == {"lemonade": 40} and out[0][0] == -100 and "✅" in out[0][1], out
+        b.handle({"message": {"message_id": 42, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 6},
+                              "pinned_message": {"message_id": 30, "text": "x #lemonadep"}}})
+        assert json.load(open(LATEST)) == {"lemonade": 40, "lemonadep": 30}
+        out.clear()       # not owner / no reply / untagged without device
+        for uid, extra in ((5, {"reply_to_message": post}), (7, {}), (7, {"reply_to_message": {"message_id": 9, "text": "hi"}})):
+            b.handle({"message": {"message_id": 43, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": uid},
+                                  "text": "/setbuild", **extra}})
+        assert out == [(-100, DENIED), (-100, "MEH"), (-100, "MEH")] and b.latest == {"lemonade": 40, "lemonadep": 30}, out
+        # PMs: owner only, anyone else ignored without a reply
+        out.clear()
+        b.api = lambda method, **kw: out.append((method, kw.get("chat_id")))
+        b.handle({"message": {"message_id": 1, "chat": {"id": 5, "type": "private"}, "from": {"id": 5}, "text": "/help"}})
+        assert out == [], out
         # admin = admin of our group only
         b = Bot.__new__(Bot)
         b.group, status = -100, {}

@@ -199,6 +199,39 @@ def size(n):
     return f"{n:.2f} TB"
 
 
+RULE = "━━━━━━━━━━━━━━━━━━━━━━"
+
+
+def span(sec):
+    sec = int(sec)
+    return f"{sec // 86400}d {sec % 86400 // 3600}h {sec % 3600 // 60}m"
+
+
+def light(ok, ms, word=False):
+    """🟢 under 1.5 s, 🟡 slower, 🔴 failed; word=True spells the state out like ONLINE."""
+    dot = "🔴" if not ok else "🟢" if ms < 1500 else "🟡"
+    if word:
+        return f"{dot} " + ("OFFLINE" if not ok else "ONLINE" if ms < 1500 else "SLOW")
+    return f"{dot} {ms}ms" if ok else f"{dot} unreachable"
+
+
+def pi_health():
+    """Pi uptime, SoC temperature, RAM/disk use and load from /proc and /sys; missing ones are None."""
+    h = {"disk": round(100 * (lambda d: d.used / d.total)(shutil.disk_usage("/"))), "load": os.getloadavg()[0]}
+    try:
+        h["uptime"] = float(open("/proc/uptime").read().split()[0])
+        mem = dict(l.split(":") for l in open("/proc/meminfo"))
+        tot, avail = (int(mem[k].split()[0]) for k in ("MemTotal", "MemAvailable"))
+        h["mem"] = round(100 * (tot - avail) / tot)
+    except (OSError, KeyError, ValueError):
+        h.setdefault("mem", "?")
+    try:
+        h["temp"] = int(open("/sys/class/thermal/thermal_zone0/temp").read()) / 1000
+    except (OSError, ValueError):
+        pass
+    return h
+
+
 def bug_ids(rest):
     """'3 #5, 7' -> [3, 5, 7]; None if anything else is in there."""
     toks = [t.lstrip("#") for t in re.split(r"[\s,]+", rest) if t]
@@ -556,8 +589,34 @@ class Bot:
         return bool(ids)
 
     def cmd_ping(self, chat, mid, rest, owner, msg):
-        up = int(time.time() - self.started)
-        self.say(chat, f"🟢 Up {up // 86400}d {up % 86400 // 3600}h {up % 3600 // 60}m", mid)
+        threading.Thread(target=lambda: self.say(chat, self.ping_text(), mid), daemon=True).start()
+
+    def timed(self, fn):
+        """-> (ok, milliseconds) for one call of fn."""
+        t = time.monotonic()
+        try:
+            fn()
+            ok = True
+        except Exception:
+            ok = False
+        return ok, int((time.monotonic() - t) * 1000)
+
+    def ping_text(self):
+        tg_ok, tg_ms = self.timed(lambda: self.api("getMe"))
+        pd_ok, pd_ms = self.timed(lambda: urllib.request.urlopen(PD_API + "misc/cluster_speed", timeout=15).read())
+        pi = pi_health()
+        return "\n".join([
+            "📊 <b>Bot Server Status</b>", RULE,
+            f"🤖 Bot: 🟢 ONLINE · up {span(time.time() - self.started)}",
+            f"🍓 Pi 4: up {span(pi['uptime'])}" if pi.get("uptime") is not None else "🍓 Pi 4: up ?",
+            f"🌡 Temp: {pi['temp']:.1f}°C" if pi.get("temp") is not None else "🌡 Temp: ?",
+            f"🧠 RAM: {pi['mem']}% · 🗄 Disk: {pi['disk']}% · ⚙️ Load: {pi['load']:.2f}",
+            f"⚡️ Telegram: {light(tg_ok, tg_ms)}",
+            "",
+            "📊 <b>Download Server Status</b>", RULE,
+            "🌐 Host: https://pixeldrain.com",
+            f"🚦 Status: {light(pd_ok, pd_ms, word=True)}",
+            f"⚡️ Latency: {pd_ms}ms" if pd_ok else "⚡️ Latency: —"])
 
     def cmd_bug(self, chat, mid, rest, owner, msg):
         reply = msg.get("reply_to_message") or {}
@@ -730,11 +789,14 @@ class Bot:
         fs_used, fs_cap = u["filesystem_storage_used"], sub["filesystem_storage_limit"]
         tx_used, tx_cap = u["monthly_transfer_used"], sub["monthly_transfer_cap"]
         self.say(chat, "\n".join([
-            f"💾 <b>Pixeldrain</b> · {html.escape(sub['name'])}",
-            f"{PD_FOLDER} folder: <b>{size(used)}</b> · {files} files",
-            f"Storage: {size(fs_used)} of {size(fs_cap)} · <b>{size(fs_cap - fs_used)} left</b>",
-            f"Bandwidth this month: {size(tx_used)} of {size(tx_cap)} · <b>{size(tx_cap - tx_used)} left</b>",
-            "<i>Bandwidth is for the whole account; pixeldrain does not count it per folder.</i>"]), mid)
+            "💾 <b>Download Server Storage</b>", RULE,
+            f"🌐 Host: https://pixeldrain.com · {html.escape(sub['name'])}",
+            f"📁 {PD_FOLDER} folder: <b>{size(used)}</b> · {files} files",
+            f"🗄 Storage: {size(fs_used)} / {size(fs_cap)}",
+            f"✅ Free: <b>{size(fs_cap - fs_used)}</b>",
+            f"📶 Bandwidth: {size(tx_used)} / {size(tx_cap)} this month",
+            f"✅ Left: <b>{size(tx_cap - tx_used)}</b>",
+            "<i>Bandwidth is account-wide; pixeldrain does not count it per folder.</i>"]), mid)
 
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
@@ -861,7 +923,10 @@ def selftest():
         assert send(7, "/resolve") == ["MEH"] and send(7, "/resolve one") == ["MEH"]
         assert BugBook(BUGS).d["next"] == 3 and bug_ids("3 #5,7") == [3, 5, 7] and bug_ids("3 x") is None
         b.started = time.time() - 90061
-        assert send(5, "/ping") == ["🟢 Up 1d 1h 1m"] and send(5, "/ping x") == ["MEH"]
+        assert span(90061) == "1d 1h 1m" and send(5, "/ping x") == ["MEH"]
+        assert light(True, 300) == "🟢 300ms" and light(True, 2000, True) == "🟡 SLOW" and light(False, 9, True) == "🔴 OFFLINE"
+        h = pi_health()
+        assert 0 <= h["disk"] <= 100 and h["load"] >= 0
         assert send(5, "/help") == []           # renamed to /notes; bare unknown in the group stays quiet
         # /update's restart marker: announced once, then gone
         global RESTARTED
@@ -884,8 +949,8 @@ def selftest():
         assert b.folder_size("me/Axion") == (2_000_001_000, 3)
         out.clear()
         b.storage_report(7, 1)
-        assert "Axion folder: <b>2.00 GB</b> · 3 files" in out[0][1] and "<b>1.92 TB left</b>" in out[0][1] \
-            and "<b>3.38 TB left</b>" in out[0][1], out
+        assert "Axion folder: <b>2.00 GB</b> · 3 files" in out[0][1] and "Free: <b>1.92 TB</b>" in out[0][1] \
+            and "Left: <b>3.38 TB</b>" in out[0][1], out
         # history: newest first, max KEEP_POSTS, re-adding moves to front; deleted posts fall through
         for i in (41, 42, 43, 41):
             b.remember({"message_id": i, "text": "#lemonade"})

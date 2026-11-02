@@ -216,7 +216,9 @@ def pct(part, whole):
 
 def storage_text(u, folder_bytes, folder_files, now, title, period):
     """Pixeldrain caption, laid out like the group's existing dashboard post. `period` is
-    [(label, bytes)] for the transfer lines specific to this report (this month, this week)."""
+    [(label, bytes)] for transfer lines specific to this report (the weekly one's "this week").
+    The folder's free space is the filesystem's: Axion lives in the filesystem, under its limit.
+    file_count counts classic /u/ uploads only, which sit outside the filesystem."""
     sub = u["subscription"]
     cap, used = sub["storage_space"], u["storage_space_used"]
     fs_cap, fs_used = sub["filesystem_storage_limit"], u["filesystem_storage_used"]
@@ -226,11 +228,10 @@ def storage_text(u, folder_bytes, folder_files, now, title, period):
     return "\n".join([
         f"📊 <b>Pixeldrain {html.escape(sub['name'])} — {title}</b>", RULE,
         f"🗄️ Storage: {size(used)} used, {left(cap, used)}",
-        f"📁 Filesystem: {size(fs_used)} used, {left(fs_cap, fs_used)}",
-        f"📂 {PD_FOLDER}: {size(folder_bytes)} · {folder_files} files",
+        f"📂 {PD_FOLDER}: {size(folder_bytes)} · {folder_files} files · {size(fs_cap - fs_used)} free",
         *(f"📥 Transfer ({label}): {size(n)}" for label, n in period),
         f"📥 Transfer (last 30 days): {size(tx_used)} used, {left(tx_cap, tx_used)}",
-        f"🔢 Files: {u['file_count']}",
+        f"🔢 Uploads outside folders: {u['file_count']} files",
         "",
         f"🕐 Updated {when.day}/{when.month}/{when.year}, {when.strftime('%I:%M:%S %p').lower()} IST"])
 
@@ -842,19 +843,13 @@ class Bot:
 
     def storage_report(self, chat, mid):
         try:
-            now = time.time()
-            month = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).day - 1    # whole days before today
-            u, used, files, now, mon = self.pd_report(month)
-            day = self.pd_get(f"user/time_series/transfer_paid?start={iso(now - 86400)}&end={iso(now)}&interval=60")
+            u, used, files, now, month = self.pd_report(29)        # today and the 29 days before
         except Exception as e:
             return self.meh(chat, mid, f"pixeldrain: {e}")
-        name = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%B %Y")
-        text = storage_text(u, used, files, now, "Dashboard", [("this month", sum(mon["amounts"]))])
+        text = storage_text(u, used, files, now, "Dashboard", [])
         try:
-            self.api("sendMediaGroup", chat_id=chat, reply_to_message_id=mid, allow_sending_without_reply="true", media=[
-                {"type": "photo", "media": chart_url(day, "Bandwidth (GB) — last 24h", "%I:%M %p"),
-                 "caption": text, "parse_mode": "HTML"},
-                {"type": "photo", "media": chart_url(mon, f"Bandwidth (GB) — {name}", "%d %b")}])
+            self.api("sendPhoto", photo=chart_url(month, "Bandwidth (GB) — last 30 days", "%d %b"), caption=text,
+                     parse_mode="HTML", chat_id=chat, reply_to_message_id=mid, allow_sending_without_reply="true")
         except Exception as e:                      # chart service down: the numbers still go out
             print("storage chart failed:", e, file=sys.stderr, flush=True)
             self.say(chat, text, mid)
@@ -1038,18 +1033,18 @@ def selftest():
         series = {"timestamps": ["2026-11-01T22:00:00Z", "2026-11-01T23:00:00Z"], "amounts": [0, 2_800_000_000]}
         b.pd_get = lambda path: user if path == "user" else series if "time_series" in path else {"children": tree[path]}
         assert b.folder_size("me/Axion") == (2_000_001_000, 3)
-        t = storage_text(user, 2_000_001_000, 3, 1788500000, "Dashboard", [("this month", 2_800_000_000)])
-        for want in ("Pixeldrain Pro — Dashboard", "130.67 GB used, unlimited left (n/a)", "83.00 GB used, 1.92 TB left (4.2%)",
-                     "Axion: 2.00 GB · 3 files", "Transfer (this month): 2.80 GB",
-                     "Transfer (last 30 days): 619.00 GB used, 3.38 TB left (15.5%)", "Files: 56", "IST"):
+        t = storage_text(user, 2_000_001_000, 3, 1788500000, "Dashboard", [])
+        for want in ("Pixeldrain Pro — Dashboard", "130.67 GB used, unlimited left (n/a)", "Axion: 2.00 GB · 3 files · 1.92 TB free",
+                     "Transfer (last 30 days): 619.00 GB used, 3.38 TB left (15.5%)", "Uploads outside folders: 56 files", "IST"):
             assert want in t, (want, t)
+        assert "Filesystem" not in t and "this month" not in t
+        assert "Transfer (this week): 2.80 GB" in storage_text(user, 1, 1, 1788500000, "Weekly Report", [("this week", 2.8e9)])
         cfg = json.loads(urllib.parse.unquote(chart_url(series, "t", "%I:%M %p")[len(CHART):]))
         assert cfg["data"]["labels"] == ["03:30 am", "04:30 am"] and cfg["data"]["datasets"][0]["data"] == [0, 2.8]
         photos = []
-        b.api = lambda method, **kw: photos.append((method, kw["chat_id"], [(m["media"][:len(CHART)], m.get("caption", "")[:12])
-                                                                           for m in kw["media"]]))
+        b.api = lambda method, **kw: photos.append((method, kw["chat_id"], kw["photo"][:len(CHART)], kw["caption"][:12]))
         b.storage_report(7, 1)
-        assert photos == [("sendMediaGroup", 7, [(CHART, "📊 <b>Pixeldr"), (CHART, "")])], photos
+        assert photos == [("sendPhoto", 7, CHART, "📊 <b>Pixeldr")], photos
         out.clear()       # chart failing still sends the numbers
         b.api = lambda method, **kw: (_ for _ in ()).throw(RuntimeError("Bad Request: wrong file"))
         b.storage_report(7, 1)

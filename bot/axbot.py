@@ -134,19 +134,15 @@ class Registry:
 # ---- Telegram ----------------------------------------------------------------
 
 class BugBook:
-    """Bug reports: {"next": id, "bugs": [{id, text, by, chat, msg, date, resolved}]}, oldest first."""
+    """Open bugs in `path` ({"next": id, "bugs": [...]}, oldest first); a resolved bug moves out to
+    `path` with -resolved (a plain list), so the open file only ever holds open bugs."""
 
     def __init__(self, path):
-        self.path = path
-        try:
-            self.d = json.load(open(path))
-        except (FileNotFoundError, ValueError):
-            self.d = {"next": 1, "bugs": []}
+        self.path, self.done_path = path, path.replace(".json", "-resolved.json")
+        self.d = load_json(path, {"next": 1, "bugs": []})
 
     def save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        json.dump(self.d, open(self.path + ".tmp", "w"), indent=1)
-        os.replace(self.path + ".tmp", self.path)
+        dump_json(self.path, self.d)
 
     def add(self, text, by, uid, chat, msg):
         b = {"id": self.d["next"], "text": text, "by": by, "uid": uid, "chat": chat, "msg": msg,
@@ -160,21 +156,31 @@ class BugBook:
         return next((b for b in self.d["bugs"] if b["id"] == i), None)
 
     def listed(self, resolved):
-        return [b for b in self.d["bugs"] if resolved or not b["resolved"]]
+        return self.d["bugs"] + (load_json(self.done_path, []) if resolved else [])
 
     def resolve(self, ids):
-        """-> (resolved bugs, [ids that were unknown or already resolved]). Ids are never reused."""
-        changed, skipped = [], []
-        for i in ids:
-            b = self.get(i)
-            if not b or b["resolved"]:
-                skipped.append(i)
-                continue
+        """Move bugs to the resolved file -> (moved bugs, [ids not open]). Ids are never reused."""
+        moved = [b for b in self.d["bugs"] if b["id"] in ids]
+        for b in moved:
             b["resolved"] = int(time.time())
-            changed.append(b)
-        if changed:
-            self.save()
-        return changed, skipped
+        if moved:
+            dump_json(self.done_path, load_json(self.done_path, []) + moved)   # archive first: a crash
+            self.d["bugs"] = [b for b in self.d["bugs"] if b not in moved]     # in between duplicates,
+            self.save()                                                        # never loses a bug
+        return moved, [i for i in ids if i not in {b["id"] for b in moved}]
+
+
+def load_json(path, default):
+    try:
+        return json.load(open(path))
+    except (FileNotFoundError, ValueError):
+        return default
+
+
+def dump_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    json.dump(data, open(path + ".tmp", "w"), indent=1)
+    os.replace(path + ".tmp", path)
 
 
 def bug_ids(rest):
@@ -667,7 +673,7 @@ class Bot:
             self.say(b["chat"], f"✅ Bug <b>#{b['id']}</b> is resolved.", b["msg"])
         out = ("✅ Resolved: " + ", ".join(f"#{b['id']}" for b in changed)) if changed else ""
         if skipped:
-            out += ("\n" if out else "") + "😬 skipped (unknown or already resolved): " + ", ".join(f"#{i}" for i in skipped)
+            out += ("\n" if out else "") + "😬 skipped (no open bug with that id): " + ", ".join(f"#{i}" for i in skipped)
         self.say(chat, out, mid)
 
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
@@ -787,7 +793,10 @@ def selftest():
         o = send(7, "/resolve #1, 9 1")
         assert o[0] == "✅ Bug <b>#1</b> is resolved." and out[0][0] == -100 and "Resolved: #1" in o[1] and "#9" in o[1], o
         assert "#1" not in send(5, "/bugs")[0] and "#1" in send(7, "/bugs all")[0]
-        assert "already resolved): #1" in send(7, "/resolve 1")[0]
+        assert "no open bug with that id): #1" in send(7, "/resolve 1")[0]
+        assert [x["id"] for x in load_json(BUGS, {})["bugs"]] == [2]                 # open file: open only
+        assert [x["id"] for x in load_json(BUGS.replace(".json", "-resolved.json"), [])] == [1]
+        assert send(5, "/editbug 1 too late") == ["MEH"]                              # resolved: not editable
         assert send(7, "/resolve") == ["MEH"] and send(7, "/resolve one") == ["MEH"]
         assert BugBook(BUGS).d["next"] == 3 and bug_ids("3 #5,7") == [3, 5, 7] and bug_ids("3 x") is None
         b.started = time.time() - 90061

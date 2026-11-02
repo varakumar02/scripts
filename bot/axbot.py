@@ -30,6 +30,7 @@ MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
 BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild"}
 BUILTIN_PUBLIC = {"start", "help", "builds", "changelog", "cmds"}
+BUILTIN_ADMIN = {"update"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
@@ -115,7 +116,7 @@ class Registry:
         os.replace(tmp, self.path)
 
     def add(self, name, access, line, caption=""):
-        if not NAME_RE.match(name) or name in BUILTIN_OWNER | BUILTIN_PUBLIC:
+        if not NAME_RE.match(name) or name in BUILTIN_OWNER | BUILTIN_PUBLIC | BUILTIN_ADMIN:
             return "name must be [a-z0-9_]{1,32} and not a built-in"
         if access not in ("public", "admin", "owner"):
             return "access must be public, admin or owner"
@@ -185,19 +186,19 @@ class Bot:
     # -- update loop
 
     def run(self):
-        offset = None
+        self.offset = None
         print(f"@{self.me} up; group {self.group}, owner {self.owner or 'UNSET'}", flush=True)
         while True:
             try:
                 self.track_pin()
-                ups = self.api("getUpdates", http_timeout=45, timeout=25, offset=offset,
+                ups = self.api("getUpdates", http_timeout=45, timeout=25, offset=self.offset,
                                allowed_updates=["message", "my_chat_member"])
             except Exception as e:
                 print("getUpdates:", e, file=sys.stderr, flush=True)
                 time.sleep(5)
                 continue
             for u in ups:
-                offset = u["update_id"] + 1
+                self.offset = u["update_id"] + 1
                 try:
                     self.handle(u)
                 except Exception as e:
@@ -262,13 +263,13 @@ class Bot:
         mid = msg["message_id"]
         custom = self.reg.cmds.get(name)
         # sent while the bot was down (Telegram queues updates for 24 h): say so before the late answer
-        will_answer = name in BUILTIN_OWNER | BUILTIN_PUBLIC or custom or addressed or private
+        will_answer = name in BUILTIN_OWNER | BUILTIN_PUBLIC | BUILTIN_ADMIN or custom or addressed or private
         if will_answer and time.time() - msg.get("date", time.time()) > STALE_AFTER:
             self.say(chat, OFFLINE, mid)
         if name in BUILTIN_OWNER or (custom and custom["access"] == "owner"):
             if not owner:
                 return self.say(chat, DENIED, mid)
-        elif custom and custom["access"] == "admin":
+        elif name in BUILTIN_ADMIN or (custom and custom["access"] == "admin"):
             if not (owner or self.is_admin(msg)):
                 return self.say(chat, DENIED, mid)
         elif name not in BUILTIN_PUBLIC and not custom:
@@ -421,7 +422,7 @@ class Bot:
                     "/changelog – changelog", "/cmds – custom commands", *custom("public")]
         if not admin:
             return "\n".join(everyone)
-        lines = ["👥 <b>Everyone</b>", *everyone, "", "🛡 <b>Admins</b>", *(custom("admin") or ["(no admin commands yet)"])]
+        lines = ["👥 <b>Everyone</b>", *everyone, "", "🛡 <b>Admins</b>", "/update – pull the newest bot code, self-test, restart", *custom("admin")]
         if owner:
             lines += ["", "👑 <b>Owner</b>",
                       "/status – Pi health",
@@ -524,6 +525,28 @@ class Bot:
             return self.meh(chat, mid, "that post has no #lemonade / #lemonadep tag; add the device: /setbuild lemonade")
         self.say(chat, f"✅ /builds {dev} now points to this post", post["message_id"])
 
+    def cmd_update(self, chat, mid, rest, owner, msg):
+        """git pull the scripts checkout; on new commits run the selftest of the new code and exit so
+        systemd (Restart=always) starts it. A failing selftest puts the checkout back where it was."""
+        git = lambda *a: subprocess.run(["git", "-C", REPO, *a], capture_output=True, text=True)
+        old = git("rev-parse", "HEAD").stdout.strip()
+        p = git("pull", "--ff-only", "-q")
+        if p.returncode:
+            return self.say(chat, "😬 <b>Update failed</b> (git pull):\n" + f"<pre>{html.escape((p.stderr or p.stdout)[-1500:])}</pre>", mid)
+        new = git("log", "-1", "--format=%h %s").stdout.strip()
+        if git("rev-parse", "HEAD").stdout.strip() == old:
+            return self.say(chat, f"👍 Already up to date: <code>{html.escape(new)}</code>", mid)
+        t = subprocess.run([sys.executable, os.path.abspath(__file__), "--selftest"], cwd=REPO,
+                           capture_output=True, text=True, timeout=300)
+        if t.returncode:
+            git("reset", "-q", "--keep", old)
+            return self.say(chat, f"😬 <b>Update rejected</b>, selftest of <code>{html.escape(new)}</code> failed; "
+                                  f"still on <code>{old[:7]}</code>:\n<pre>{html.escape((t.stderr or t.stdout)[-1500:])}</pre>", mid)
+        self.say(chat, f"✅ Updated <code>{old[:7]}</code> → <code>{html.escape(new)}</code>, restarting…", mid)
+        print(f"/update {old[:7]} -> {new}, exiting for systemd to restart", flush=True)
+        self.api("getUpdates", offset=self.offset, timeout=0)    # confirm this /update, or it runs again
+        os._exit(0)
+
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
         self.meh(chat, mid, err) if err else self.say(chat, f"removed /{rest}", mid)
@@ -582,7 +605,7 @@ def selftest():
         b.owner, b.reg.cmds["own"]["cmd"] = 7, "true"
         b.is_admin = lambda msg: msg["from"]["id"] == 6
         b.meh = lambda chat, mid, why=None: out.append((chat, "MEH"))
-        for uid, text, want in ((5, "/sh ls", DENIED), (5, "/own", DENIED), (5, "/adm", DENIED), (6, "/own", DENIED),
+        for uid, text, want in ((5, "/update", DENIED), (5, "/sh ls", DENIED), (5, "/own", DENIED), (5, "/adm", DENIED), (6, "/own", DENIED),
                                 (6, "/addcmd x public y", DENIED), (5, "/nope@axbot", "MEH"), (5, "/builds x", "MEH"),
                                 (5, "/help me", "MEH")):
             out.clear()

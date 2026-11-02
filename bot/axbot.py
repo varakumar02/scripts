@@ -388,14 +388,19 @@ class Bot:
         self.cmd_help(chat, mid, rest, owner, msg)
 
     def cmd_help(self, chat, mid, rest, owner, msg):
-        lines = ["/builds [lemonade|lemonadep] – newest release post",
-                 "/changelog – changelog", "/cmds – custom commands"]
+        admin = owner or self.is_admin(msg)
+        custom = lambda access: [f"/{n}" for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
+        lines = [f"👤 You're {'the owner' if owner else 'an admin' if admin else 'a member'}", "",
+                 "<b>Everyone</b>", "/help – this list", "/builds [lemonade|lemonadep] – newest release post",
+                 "/changelog – changelog", "/cmds – custom commands", *custom("public")]
+        if admin and custom("admin"):
+            lines += ["", "<b>Admins</b>", *custom("admin")]
         if owner:
-            lines += ["", "owner:", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
+            lines += ["", "<b>Owner</b>", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
                       "post text = $OUT/tg_message.txt (HTML or *Markdown*) if the script wrote one, else the ## text expanded each run ($1, $(date)…)",
-                      "/delcmd &lt;name&gt;"]
+                      "/delcmd &lt;name&gt;", *custom("owner")]
         self.say(chat, "\n".join(lines), mid)
 
     def cmd_builds(self, chat, mid, rest, owner, msg):
@@ -486,6 +491,18 @@ def selftest():
         assert r.add("hello", "owner", "echo bye", "cap $1") is None and r.cmds["hello"]["caption"] == "cap $1"
         assert r.add("hello", "owner", "echo bye") is None and "caption" not in r.cmds["hello"]
         assert r.remove("hello") is None and r.remove("hello")
+        # /help shows each role only what it may run
+        b = Bot.__new__(Bot)
+        b.reg, got = Registry(os.path.join(d, "h.json")), []
+        for n, acc in (("pub", "public"), ("adm", "admin"), ("own", "owner")):
+            b.reg.add(n, acc, "true")
+        b.say = lambda chat, text, reply=None, pre=False: got.append(text)
+        for owner, admin, want, hide in ((False, False, ["/pub"], ["/adm", "/own", "/sh"]),
+                                         (False, True, ["/pub", "/adm"], ["/own", "/sh"]),
+                                         (True, True, ["/pub", "/adm", "/own", "/sh", "/addcmd"], [])):
+            b.is_admin = lambda msg, a=admin: a
+            b.cmd_help(1, 1, "", owner, {})
+            assert all(w in got[-1] for w in want) and not any(h in got[-1] for h in hide), got[-1]
         # admin = admin of our group only
         b = Bot.__new__(Bot)
         b.group, status = -100, {}

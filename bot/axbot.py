@@ -399,23 +399,31 @@ class Bot:
         self.cmd_help(chat, mid, rest, owner, msg)
 
     def help_text(self, owner, admin):
+        """Members: one plain list. Admins: Everyone + Admins sections. Owner (PM only): + Owner."""
         custom = lambda access: [f"/{n}" for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
-        lines = ["/help – this list", "/builds [lemonade|lemonadep] – newest release post",
-                 "/changelog – changelog", "/cmds – custom commands", *custom("public")]
-        if admin:
-            lines += custom("admin")
+        everyone = ["/help – this list", "/builds [lemonade|lemonadep] – newest release post",
+                    "/changelog – changelog", "/cmds – custom commands", *custom("public")]
+        if not admin:
+            return "\n".join(everyone)
+        lines = ["👥 <b>Everyone</b>", *everyone, "", "🛡 <b>Admins</b>", *(custom("admin") or ["(no admin commands yet)"])]
         if owner:
-            lines += ["/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
-                      "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
-                      "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
-                      "post text = $OUT/tg_message.txt (HTML or *Markdown*) if the script wrote one, else the ## text expanded each run ($1, $(date)…)",
+            lines += ["", "👑 <b>Owner</b>",
+                      "/status – Pi health",
+                      "/sh &lt;cmd&gt; – shell on the Pi",
+                      "/post [args] – tg_post.sh --dry-run",
+                      "/post! [args] – tg_post.sh, send for real",
+                      "/setbuild [device] – reply to a release post: /builds shows it",
+                      "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption]",
+                      "    files the command leaves in $OUT are posted, its output never",
+                      "    text: $OUT/tg_message.txt (HTML or *Markdown*), else the ## caption ($1, $(date)… per run)",
                       "/delcmd &lt;name&gt;",
-                      "/setbuild [device] – reply to a release post: /builds shows it for its device", *custom("owner")]
+                      *custom("owner")]
         return "\n".join(lines)
 
     def cmd_help(self, chat, mid, rest, owner, msg):
-        admin = owner or self.is_admin(msg)
-        self.say(chat, self.help_text(owner, admin), mid)
+        # in the group the owner gets the admin view; the full list only in the owner's PM
+        full = owner and chat != self.group
+        self.say(chat, self.help_text(full, owner or self.is_admin(msg)), mid)
 
     def cmd_builds(self, chat, mid, rest, owner, msg):
         rest = rest.lower()
@@ -446,8 +454,8 @@ class Bot:
         return "\n".join(rows) or "no custom commands."
 
     def cmd_cmds(self, chat, mid, rest, owner, msg):
-        admin = owner or self.is_admin(msg)
-        self.say(chat, self.cmds_text(owner, admin), mid)
+        full = owner and chat != self.group             # command lines and owner commands: owner's PM only
+        self.say(chat, self.cmds_text(full, owner or self.is_admin(msg)), mid)
 
     # -- built-ins (owner)
 
@@ -525,16 +533,19 @@ def selftest():
         for n, acc in (("pub", "public"), ("adm", "admin"), ("own", "owner")):
             b.reg.add(n, acc, "true")
         b.say = lambda chat, text, reply=None, pre=False: out.append((chat, text))
-        roles = ((False, False, {"/pub"}), (False, True, {"/pub", "/adm"}), (True, True, {"/pub", "/adm", "/own"}))
+        # (owner, admin, chat) -> what the reply may name; the owner's PM is the only full list
+        cases = ((False, False, -100, {"/pub"}), (False, True, -100, {"/pub", "/adm"}),
+                 (True, True, -100, {"/pub", "/adm"}), (True, True, 7, {"/pub", "/adm", "/own"}))
         for cmd in (b.cmd_help, b.cmd_cmds):
-            for owner, admin, sees in roles:
+            for owner, admin, chat, sees in cases:
                 b.is_admin = lambda msg, a=admin: a
-                for chat in (-100, 5):
-                    out.clear()
-                    cmd(chat, 1, "", owner, {"from": {"id": 5}})
-                    assert len(out) == 1 and out[0][0] == chat, out
-                    assert {c for c in ("/pub", "/adm", "/own") if c in out[0][1]} == sees, out
-                    assert ("/sh" in out[0][1]) == (owner and cmd == b.cmd_help), out
+                out.clear()
+                cmd(chat, 1, "", owner, {"from": {"id": 5}})
+                assert len(out) == 1 and out[0][0] == chat, out
+                assert {c for c in ("/pub", "/adm", "/own") if c in out[0][1]} == sees, (owner, chat, out)
+                assert ("/sh" in out[0][1]) == (chat == 7 and cmd == b.cmd_help), out
+                assert ("<code>" in out[0][1]) == (chat == 7 and cmd == b.cmd_cmds), out
+                assert ("Admins" in out[0][1]) == (admin and cmd == b.cmd_help), out
         # denied vs unknown, through handle()
         b.owner, b.reg.cmds["own"]["cmd"] = 7, "true"
         b.is_admin = lambda msg: msg["from"]["id"] == 6

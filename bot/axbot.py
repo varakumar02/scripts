@@ -22,6 +22,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.expanduser("~/.config/axbot/commands.json")
 LATEST = os.path.expanduser("~/.config/axbot/latest.json")
 BUGS = os.path.expanduser("~/.config/axbot/bugs.json")
+RESTARTED = os.path.expanduser("~/.config/axbot/restarted.json")   # set by /update, read once at start
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
 LOGS = os.path.expanduser("~/.cache/axbot/logs")
 RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
@@ -245,6 +246,7 @@ class Bot:
 
     def run(self):
         self.offset = None
+        self.announce_restart()
         print(f"@{self.me} up; group {self.group}, owner {self.owner or 'UNSET'}", flush=True)
         while True:
             try:
@@ -261,6 +263,19 @@ class Bot:
                     self.handle(u)
                 except Exception as e:
                     print("handle:", repr(e), file=sys.stderr, flush=True)
+
+    def announce_restart(self):
+        """After /update's restart: reply under that /update message with the commit now running."""
+        r = load_json(RESTARTED, None)
+        if not r:
+            return
+        head = subprocess.run(["git", "-C", REPO, "log", "-1", "--format=%h %s"], capture_output=True, text=True).stdout.strip()
+        try:
+            self.api("sendMessage", chat_id=r["chat"], text=f"🟢 Back up on <code>{html.escape(head)}</code>",
+                     parse_mode="HTML", reply_to_message_id=r["mid"], allow_sending_without_reply="true")
+        except Exception as e:                       # network not up yet: keep the marker for the next start
+            return print("restart announcement not sent:", e, file=sys.stderr, flush=True)
+        os.remove(RESTARTED)
 
     def track_pin(self):
         """Remember the group's newest pinned release post per device (tg_post.sh pins each one).
@@ -663,6 +678,7 @@ class Bot:
         self.say(chat, f"✅ Updated <code>{old[:7]}</code> → <code>{html.escape(new)}</code>, restarting…", mid)
         print(f"/update {old[:7]} -> {new}, exiting for systemd to restart", flush=True)
         self.api("getUpdates", offset=self.offset, timeout=0)    # confirm this /update, or it runs again
+        dump_json(RESTARTED, {"chat": chat, "mid": mid})
         os._exit(0)
 
     def cmd_resolve(self, chat, mid, rest, owner, msg):
@@ -803,6 +819,17 @@ def selftest():
         b.started = time.time() - 90061
         assert send(5, "/ping") == ["🟢 Up 1d 1h 1m"] and send(5, "/ping x") == ["MEH"]
         assert send(5, "/help") == []           # renamed to /notes; bare unknown in the group stays quiet
+        # /update's restart marker: announced once, then gone
+        global RESTARTED
+        RESTARTED = os.path.join(d, "restarted.json")
+        out.clear()
+        dump_json(RESTARTED, {"chat": 7, "mid": 99})
+        b.api = lambda method, **kw: (_ for _ in ()).throw(OSError("network down"))
+        b.announce_restart()
+        assert out == [] and os.path.exists(RESTARTED), out                     # kept for the next start
+        b.api = lambda method, **kw: out.append((kw["chat_id"], kw["text"]))
+        b.announce_restart(); b.announce_restart()
+        assert len(out) == 1 and out[0][0] == 7 and out[0][1].startswith("🟢 Back up on <code>") and not os.path.exists(RESTARTED), out
         # history: newest first, max KEEP_POSTS, re-adding moves to front; deleted posts fall through
         for i in (41, 42, 43, 41):
             b.remember({"message_id": i, "text": "#lemonade"})

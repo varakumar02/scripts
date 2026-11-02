@@ -24,6 +24,7 @@ LATEST = os.path.expanduser("~/.config/axbot/latest.json")
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
 LOGS = os.path.expanduser("~/.cache/axbot/logs")
 RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
+KEEP_POSTS = 3        # release posts remembered per device, so a deleted one falls back to the previous
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
@@ -139,6 +140,8 @@ class Bot:
             self.latest = json.load(open(LATEST))
         except (FileNotFoundError, ValueError):
             self.latest = {}
+        # {device: [message ids, newest first]}; older files kept one bare id per device
+        self.latest = {d: v if isinstance(v, list) else [v] for d, v in self.latest.items()}
         self.last_pin = None
         self.me = self.api("getMe")["username"]
 
@@ -209,14 +212,21 @@ class Bot:
         self.remember(pin)
 
     def remember(self, post, dev=None):
-        """Store `post` as its device's newest release post -> device, or None if it names none."""
+        """Put `post` first in its device's list of the last KEEP_POSTS release posts -> device,
+        or None if it names none."""
         dev = dev or post_device(post.get("text") or post.get("caption"))
-        if dev and self.latest.get(dev) != post["message_id"]:
-            self.latest[dev] = post["message_id"]
-            os.makedirs(os.path.dirname(LATEST), exist_ok=True)
-            json.dump(self.latest, open(LATEST, "w"))
-            print(f"latest {dev} post: {post['message_id']}", flush=True)
+        ids = self.latest.get(dev, [])
+        if dev and ids[:1] != [post["message_id"]]:
+            self.save_posts(dev, [post["message_id"], *(i for i in ids if i != post["message_id"])])
+            print(f"latest {dev} posts: {self.latest[dev]}", flush=True)
         return dev
+
+    def save_posts(self, dev, ids):
+        self.latest[dev] = ids[:KEEP_POSTS]
+        os.makedirs(os.path.dirname(LATEST), exist_ok=True)
+        tmp = LATEST + ".tmp"
+        json.dump(self.latest, open(tmp, "w"))
+        os.replace(tmp, LATEST)
 
     def handle(self, u):
         msg = u.get("message") or u.get("my_chat_member")
@@ -431,13 +441,29 @@ class Bot:
             return self.meh(chat, mid)
         self.track_pin()
         for d in [rest] if rest else DEVICES:
-            post = self.latest.get(d)
-            if not post:
+            if not self.show_post(chat, d):
                 self.say(chat, f"No {DEVICES[d]} ({d}) release posted yet.", mid)
-            elif chat == self.group:
-                self.say(chat, f"⬆️ Latest {DEVICES[d]} ({d}) build", post)
-            else:
-                self.api("forwardMessage", chat_id=chat, from_chat_id=self.group, message_id=post)
+
+    def show_post(self, chat, dev):
+        """Point at the newest of dev's remembered posts that still exists: a reply to it in the group,
+        a forward of it in a PM. Deleted ones ("... not found") are dropped. -> False if none is left."""
+        ids = list(self.latest.get(dev, []))
+        while ids:
+            try:
+                if chat == self.group:
+                    self.api("sendMessage", chat_id=chat, text=f"⬆️ Latest {DEVICES[dev]} ({dev}) build",
+                             reply_to_message_id=ids[0], allow_sending_without_reply="false")
+                else:
+                    self.api("forwardMessage", chat_id=chat, from_chat_id=self.group, message_id=ids[0])
+                break
+            except RuntimeError as e:
+                if "not found" not in str(e):
+                    raise
+                print(f"{dev} post {ids[0]} is gone: {e}", flush=True)
+                ids.pop(0)
+        if ids != self.latest.get(dev, []):
+            self.save_posts(dev, ids)
+        return bool(ids)
 
     def cmd_changelog(self, chat, mid, rest, owner, msg):
         try:
@@ -565,15 +591,32 @@ def selftest():
         out.clear()
         b.handle({"message": {"message_id": 41, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 7},
                               "text": "/setbuild", "reply_to_message": post}})
-        assert b.latest == {"lemonade": 40} and out[0][0] == -100 and "✅" in out[0][1], out
+        assert b.latest == {"lemonade": [40]} and out[0][0] == -100 and "✅" in out[0][1], out
         b.handle({"message": {"message_id": 42, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 6},
                               "pinned_message": {"message_id": 30, "text": "x #lemonadep"}}})
-        assert json.load(open(LATEST)) == {"lemonade": 40, "lemonadep": 30}
+        assert json.load(open(LATEST)) == {"lemonade": [40], "lemonadep": [30]}
         out.clear()       # not owner / no reply / untagged without device
         for uid, extra in ((5, {"reply_to_message": post}), (7, {}), (7, {"reply_to_message": {"message_id": 9, "text": "hi"}})):
             b.handle({"message": {"message_id": 43, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": uid},
                                   "text": "/setbuild", **extra}})
-        assert out == [(-100, DENIED), (-100, "MEH"), (-100, "MEH")] and b.latest == {"lemonade": 40, "lemonadep": 30}, out
+        assert out == [(-100, DENIED), (-100, "MEH"), (-100, "MEH")] and b.latest == {"lemonade": [40], "lemonadep": [30]}, out
+        # history: newest first, max KEEP_POSTS, re-adding moves to front; deleted posts fall through
+        for i in (41, 42, 43, 41):
+            b.remember({"message_id": i, "text": "#lemonade"})
+        assert b.latest["lemonade"] == [41, 43, 42], b.latest
+        gone = {41, 43}
+        def api(method, **kw):
+            if kw.get("reply_to_message_id", kw.get("message_id")) in gone:
+                raise RuntimeError("Bad Request: message to be replied not found")
+            out.append((method, kw["chat_id"], kw.get("reply_to_message_id", kw.get("message_id"))))
+        b.api, b.track_pin = api, lambda: None
+        out.clear()
+        b.cmd_builds(-100, 1, "lemonade", True, {})
+        assert out == [("sendMessage", -100, 42)] and b.latest["lemonade"] == [42], out
+        assert json.load(open(LATEST))["lemonade"] == [42]
+        out.clear(); gone.add(42)
+        b.cmd_builds(7, 1, "lemonade", True, {})
+        assert out == [(7, "No OnePlus 9 (lemonade) release posted yet.")] and b.latest["lemonade"] == [], out
         # PMs: owner only, anyone else ignored without a reply
         out.clear()
         b.api = lambda method, **kw: out.append((method, kw.get("chat_id")))

@@ -171,6 +171,7 @@ class Bot:
             return
         chat = msg["chat"]["id"]
         if not chat_allowed(chat, self.group, self.owner):
+            print(f"ignored update from chat {chat} ({msg['chat']['type']})", flush=True)
             if msg["chat"]["type"] != "private":
                 print(f"leaving foreign chat {chat} {msg['chat'].get('title')!r}", flush=True)
                 try:
@@ -189,6 +190,7 @@ class Bot:
             return
         name, rest = parsed
         owner = is_owner(msg, self.owner)
+        print(f"chat {chat} from {msg.get('from', {}).get('id')}{' (owner)' if owner else ''}: /{name}", flush=True)
         mid = msg["message_id"]
         custom = self.reg.cmds.get(name)
         if name in BUILTIN_OWNER or (custom and custom["access"] == "owner"):

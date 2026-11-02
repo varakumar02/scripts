@@ -249,4 +249,13 @@ else
     RES=$(tg sendMessage --form-string "chat_id=$TG_CHAT_ID" --form-string "text=$MSG" \
             --form-string parse_mode=HTML --form-string disable_web_page_preview=true "${EXTRA[@]}") || true
 fi
-python3 -c 'import json,sys; d=json.load(sys.stdin); print("sent, message_id", d["result"]["message_id"]) if d.get("ok") else sys.exit("telegram error: "+str(d.get("description")))' <<<"$RES"
+MSG_ID=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["result"]["message_id"]) if d.get("ok") else sys.exit("telegram error: "+str(d.get("description")))' <<<"$RES")
+echo "sent, message_id $MSG_ID"
+# A release post becomes the chat's newest pin; the bot's /latest reads that pin
+# (getChat.pinned_message), so each new release replaces the old one there.
+# --text announcements are not releases and are left unpinned.
+if (( ! CUSTOM )); then
+    tg pinChatMessage --form-string "chat_id=$TG_CHAT_ID" --form-string "message_id=$MSG_ID" \
+        --form-string disable_notification=true | grep -q '"ok":true' && echo "pinned" \
+        || echo "warning: pin failed -- give the bot the 'Pin messages' admin right"
+fi

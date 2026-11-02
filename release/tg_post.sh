@@ -251,8 +251,9 @@ else
 fi
 MSG_ID=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["result"]["message_id"]) if d.get("ok") else sys.exit("telegram error: "+str(d.get("description")))' <<<"$RES")
 echo "sent, message_id $MSG_ID"
-# A release post becomes the chat's newest pin; the bot's /latest reads that pin
-# (getChat.pinned_message), so each new release replaces the old one there.
+# A release post becomes the chat's newest pin; the bot's /builds reads that pin
+# (getChat.pinned_message, per device by its #<device> tag), so each new release
+# replaces the previous one for that device.
 # --text announcements are not releases and are left unpinned.
 if (( ! CUSTOM )); then
     tg pinChatMessage --form-string "chat_id=$TG_CHAT_ID" --form-string "message_id=$MSG_ID" \

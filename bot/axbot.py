@@ -15,18 +15,19 @@ fresh directory in $OUT (also the cwd); files left there are sent back.
   python3 bot/axbot.py             # run
   python3 bot/axbot.py --selftest  # checks for the parsing/permission logic
 """
-import html, json, os, re, shlex, shutil, subprocess, sys, threading, time, uuid
+import html, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid
 import urllib.error, urllib.parse, urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.expanduser("~/.config/axbot/commands.json")
+LATEST = os.path.expanduser("~/.config/axbot/latest.json")
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
 RAW = "https://raw.githubusercontent.com/varakumar02/scripts/aox/"
-DEVICES = ("lemonade", "lemonadep")
+DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
 BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd"}
-BUILTIN_PUBLIC = {"start", "help", "latest", "builds", "changelog", "cmds"}
+BUILTIN_PUBLIC = {"start", "help", "builds", "changelog", "cmds"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
@@ -53,6 +54,18 @@ def parse_command(text, me):
     if target and target.lower() != me.lower():
         return None
     return name.lower(), rest.strip()
+
+
+def post_device(text):
+    """Device of a tg_post.sh release post, from its #<device> tag (tg_message.txt)."""
+    m = re.search(r"#(lemonadep?)\b", text or "")
+    return m and m[1]
+
+
+INVALID = ("🍋 <b>{}</b>? Never heard of it. I only squeeze <code>lemonade</code> and <code>lemonadep</code>.",
+           "🤖 Searched every server, two Raspberry Pis and under the sofa: no <b>{}</b>. Try <code>lemonade</code> or <code>lemonadep</code>.",
+           "📵 <b>{}</b> isn't a OnePlus 9 — did your cat walk on the keyboard? <code>/builds lemonade</code> or <code>/builds lemonadep</code>.",
+           "🧃 Wrong flavour! <b>{}</b> is not on the menu. We serve <code>lemonade</code> and <code>lemonadep</code> only.")
 
 
 def chat_allowed(chat_id, group_id, owner_id):
@@ -108,6 +121,11 @@ class Bot:
         self.group = int(env["TG_CHAT_ID"])
         self.owner = int(env.get("TG_OWNER_ID") or 0)
         self.reg = Registry(STATE)
+        try:
+            self.latest = json.load(open(LATEST))
+        except (FileNotFoundError, ValueError):
+            self.latest = {}
+        self.last_pin = None
         self.me = self.api("getMe")["username"]
 
     def api(self, method, files=None, http_timeout=60, **params):
@@ -152,7 +170,8 @@ class Bot:
         print(f"@{self.me} up; group {self.group}, owner {self.owner or 'UNSET'}", flush=True)
         while True:
             try:
-                ups = self.api("getUpdates", http_timeout=70, timeout=50, offset=offset,
+                self.track_pin()
+                ups = self.api("getUpdates", http_timeout=45, timeout=25, offset=offset,
                                allowed_updates=["message", "my_chat_member"])
             except Exception as e:
                 print("getUpdates:", e, file=sys.stderr, flush=True)
@@ -164,6 +183,21 @@ class Bot:
                     self.handle(u)
                 except Exception as e:
                     print("handle:", repr(e), file=sys.stderr, flush=True)
+
+    def track_pin(self):
+        """Remember the group's newest pinned release post per device (tg_post.sh pins each one).
+        ponytail: only the newest pin is visible through getChat, checked every <=25 s, so two release
+        posts pinned within one poll keep only the second; post them a minute apart."""
+        pin = self.api("getChat", chat_id=self.group).get("pinned_message")
+        if not pin or pin["message_id"] == self.last_pin:
+            return
+        self.last_pin = pin["message_id"]
+        dev = post_device(pin.get("text") or pin.get("caption"))
+        if dev and self.latest.get(dev) != pin["message_id"]:
+            self.latest[dev] = pin["message_id"]
+            os.makedirs(os.path.dirname(LATEST), exist_ok=True)
+            json.dump(self.latest, open(LATEST, "w"))
+            print(f"latest {dev} post: {pin['message_id']}", flush=True)
 
     def handle(self, u):
         msg = u.get("message") or u.get("my_chat_member")
@@ -184,7 +218,7 @@ class Bot:
         for m in msg.get("new_chat_members", []):
             if not m.get("is_bot"):
                 self.say(chat, f"Welcome, {html.escape(m.get('first_name', ''))}! "
-                               "Newest build: /latest · all builds: /builds · commands: /help")
+                               "Newest builds: /builds · commands: /help")
         parsed = parse_command(msg.get("text"), self.me)
         if not parsed:
             return
@@ -239,7 +273,7 @@ class Bot:
         self.cmd_help(chat, mid, rest, owner)
 
     def cmd_help(self, chat, mid, rest, owner):
-        lines = ["/latest – newest release post", "/builds [lemonade|lemonadep] – current OTA build",
+        lines = ["/builds [lemonade|lemonadep] – newest release post",
                  "/changelog – changelog", "/cmds – custom commands"]
         if owner:
             lines += ["", "owner:", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
@@ -248,28 +282,19 @@ class Bot:
                       "/delcmd &lt;name&gt;"]
         self.say(chat, "\n".join(lines), mid)
 
-    def cmd_latest(self, chat, mid, rest, owner):
-        pin = self.api("getChat", chat_id=self.group).get("pinned_message")
-        if not pin:
-            return self.say(chat, "no release pinned yet.", mid)
-        if chat == self.group:
-            self.say(chat, "⬆️ Latest build", pin["message_id"])
-        else:
-            self.api("forwardMessage", chat_id=chat, from_chat_id=self.group, message_id=pin["message_id"])
-
     def cmd_builds(self, chat, mid, rest, owner):
-        devs = [rest] if rest in DEVICES else DEVICES
-        out = []
-        for d in devs:
-            try:
-                b = json.load(urllib.request.urlopen(RAW + f"OTA/GMS/{d}.json", timeout=20))["response"][0]
-            except Exception as e:
-                out.append(f"<b>{d}</b>: unavailable ({html.escape(str(e))})")
-                continue
-            out.append(f"<b>{d}</b> · {html.escape(b['version'])} · "
-                       f"{time.strftime('%Y-%m-%d', time.gmtime(b['datetime']))} · {b['size'] / 2**30:.2f} GiB\n"
-                       f"<a href=\"{html.escape(b['url'])}\">{html.escape(b['filename'])}</a>")
-        self.say(chat, "\n\n".join(out), mid)
+        rest = rest.strip().lower()
+        if rest and rest not in DEVICES:
+            return self.say(chat, random.choice(INVALID).format(html.escape(rest[:40])), mid)
+        self.track_pin()
+        for d in [rest] if rest else DEVICES:
+            post = self.latest.get(d)
+            if not post:
+                self.say(chat, f"No {DEVICES[d]} ({d}) release posted yet.", mid)
+            elif chat == self.group:
+                self.say(chat, f"⬆️ Latest {DEVICES[d]} ({d}) build", post)
+            else:
+                self.api("forwardMessage", chat_id=chat, from_chat_id=self.group, message_id=post)
 
     def cmd_changelog(self, chat, mid, rest, owner):
         try:
@@ -309,7 +334,11 @@ class Bot:
 
 
 def selftest():
-    assert parse_command("/latest", "axbot") == ("latest", "")
+    assert parse_command("/help", "axbot") == ("help", "")
+    assert post_device("for Oneplus 9 Pro (lemonadep)\n#A16 #lemonadep #Axion") == "lemonadep"
+    assert post_device("for Oneplus 9 (lemonade)\n#A16 #lemonade #Axion") == "lemonade"
+    assert not post_device("rules: no lemonade talk") and not post_device(None)
+    assert all(t.format("x").count("x") for t in INVALID)
     assert parse_command("/Builds@AxBot lemonadep", "axbot") == ("builds", "lemonadep")
     assert parse_command("/builds@otherbot", "axbot") is None
     assert parse_command("hello", "axbot") is None

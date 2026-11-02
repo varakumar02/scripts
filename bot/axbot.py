@@ -74,6 +74,13 @@ def tg_len(text):
     return len(html.unescape(re.sub(r"<[^>]+>", "", text)).encode("utf-16-le")) // 2
 
 
+def parse_mode_for(text):
+    """HTML when the text has Telegram HTML tags, else legacy Markdown (*bold* _italic_ `code` [t](url))."""
+    if re.search(r"</?(b|i|u|s|code|pre|a|strong|em|ins|del|strike|tg-spoiler|blockquote)\b[^>]*>", text, re.I):
+        return "HTML"
+    return "Markdown"
+
+
 def chat_allowed(chat_id, group_id, owner_id):
     return chat_id in (group_id, owner_id)
 
@@ -292,11 +299,13 @@ class Bot:
         self.api("sendDocument", files={"document": path}, http_timeout=600, chat_id=chat, caption=caption,
                  reply_to_message_id=reply, allow_sending_without_reply="true")
 
-    def send_html(self, method, field, text, **kw):
-        """sendMessage/sendDocument with `field` as HTML; Telegram rejects broken HTML outright, so
-        retry it as plain text rather than lose the post."""
+    def send_fmt(self, method, field, text, **kw):
+        """sendMessage/sendDocument with `field` as HTML or Markdown (see parse_mode_for); Telegram
+        rejects broken markup outright, so retry it as plain text rather than lose the post."""
+        if not text:
+            return self.api(method, **kw)
         try:
-            return self.api(method, **kw, **{field: text, "parse_mode": "HTML"})
+            return self.api(method, **kw, **{field: text, "parse_mode": parse_mode_for(text)})
         except RuntimeError as e:
             if "parse entities" not in str(e):
                 raise
@@ -349,12 +358,12 @@ class Bot:
             try:
                 # caption limit is 1024 as Telegram counts it (parsed text, UTF-16); longer -> own message
                 if caption and (not files or tg_len(caption) > 1024):
-                    self.send_html("sendMessage", "text", caption[:4096], chat_id=chat,
+                    self.send_fmt("sendMessage", "text", caption[:4096], chat_id=chat,
                                    reply_to_message_id=mid, allow_sending_without_reply="true",
                                    disable_web_page_preview="true")
                     caption = None
                 for f in files:
-                    self.send_html("sendDocument", "caption", caption, files={"document": f}, http_timeout=600,
+                    self.send_fmt("sendDocument", "caption", caption, files={"document": f}, http_timeout=600,
                                    chat_id=chat, reply_to_message_id=mid, allow_sending_without_reply="true")
             except Exception as e:
                 problem = f"posting failed: {e}"
@@ -385,7 +394,7 @@ class Bot:
             lines += ["", "owner:", "/status – Pi health", "/sh &lt;cmd&gt; – shell on the Pi",
                       "/post [args] – tg_post.sh --dry-run · /post! [args] – send for real",
                       "/addcmd &lt;name&gt; &lt;public|admin|owner&gt; &lt;command line&gt; [## caption] – files written to $OUT are posted; "
-                      "post text = $OUT/tg_message.txt (HTML) if the script wrote one, else the ## text expanded each run ($1, $(date)…)",
+                      "post text = $OUT/tg_message.txt (HTML or *Markdown*) if the script wrote one, else the ## text expanded each run ($1, $(date)…)",
                       "/delcmd &lt;name&gt;"]
         self.say(chat, "\n".join(lines), mid)
 
@@ -451,6 +460,8 @@ def selftest():
     assert parse_command("/help", "axbot") == ("help", "", False)
     assert parse_command("/builds\nlemonade", "axbot") == ("builds", "lemonade", False)
     assert parse_command("/", "axbot") == ("", "", False) and parse_command("/@axbot", "axbot") == ("", "", True)
+    assert parse_mode_for("*Status:* ok") == "Markdown" and parse_mode_for("<b>x</b> 1 < 2") == "HTML"
+    assert parse_mode_for('<a href="u">t</a>') == "HTML" and parse_mode_for("a <b c") == "Markdown"
     assert len(MEH) == 12 and len(set(MEH)) == 12
     assert post_device("for Oneplus 9 Pro (lemonadep)\n#A16 #lemonadep #Axion") == "lemonadep"
     assert post_device("for Oneplus 9 (lemonade)\n#A16 #lemonade #Axion") == "lemonade"
@@ -500,13 +511,16 @@ def selftest():
         b.say = lambda chat, text, reply=None, pre=False: calls.append(("say", chat, text))
         mk = 'echo noise; echo "$1" > "$OUT/r.txt"'
         b.run_custom(-100, 1, "t", {"cmd": mk, "caption": "for $1: $(ls) \"q\""}, ["$(id)"], "u")
-        assert calls == [("sendDocument", -100, "r.txt", "$(id)\n", 'for $(id): r.txt "q"', "HTML")], calls
+        assert calls == [("sendDocument", -100, "r.txt", "$(id)\n", 'for $(id): r.txt "q"', "Markdown")], calls
         calls.clear()     # $OUT/tg_message.txt wins over the template and is not uploaded itself
         b.run_custom(-100, 1, "t", {"cmd": mk + '; echo "<b>made $1</b>" > tg_message.txt', "caption": "tmpl"}, ["x"], "u")
         assert calls == [("sendDocument", -100, "r.txt", "x\n", "<b>made x</b>", "HTML")] and not os.listdir(RUNS), calls
         calls.clear()     # text only -> one message; broken HTML -> sent plain
-        b.run_custom(-100, 1, "t", {"cmd": 'echo "<bad html" > "$OUT/tg_message.txt"'}, [], "u")
-        assert calls == [("sendMessage", -100, None, None, "<bad html", None)], calls
+        b.run_custom(-100, 1, "t", {"cmd": 'echo "<b><bad html" > "$OUT/tg_message.txt"'}, [], "u")
+        assert calls == [("sendMessage", -100, None, None, "<b><bad html", None)], calls
+        calls.clear()     # Markdown file -> parse_mode Markdown
+        b.run_custom(-100, 1, "t", {"cmd": 'echo "*Status:* 🟢🟢🟢" > "$OUT/tg_message.txt"'}, [], "u")
+        assert calls == [("sendMessage", -100, None, None, "*Status:* 🟢🟢🟢", "Markdown")], calls
         calls.clear()     # caption over 1024 -> message first, then the file uncaptioned
         b.run_custom(-100, 1, "t", {"cmd": mk + '; printf "%02000d" 0 > tg_message.txt'}, ["x"], "u")
         assert [c[0] for c in calls] == ["sendMessage", "sendDocument"] and calls[1][4] is None, calls

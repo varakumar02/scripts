@@ -16,7 +16,7 @@
 
 <!-- Bluetooth module: our fork carrying Jammy555's dual A2DP audio sharing -->
 <remove-project path="packages/modules/Bluetooth" />
-<project name="varakumar02/packages_modules_Bluetooth" path="packages/modules/Bluetooth" revision="aox" remote="github" />
+<project name="varakumar02/packages_modules_Bluetooth" path="packages/modules/Bluetooth" revision="aox-aptxad" remote="github" />
 
 <!-- GhostWire (independent pentest app, included here) -->
 <project name="varakumar02/GhostWire" path="packages/apps/GhostWire" revision="aox" remote="github" />

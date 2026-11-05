@@ -14,7 +14,7 @@
 <project name="varakumar02/open_oplus_camera_blobs" path="vendor/oplus/camera-blobs" revision="aox" remote="github-ssh" />
 <project name="LineageOS/android_hardware_pixelworks_interfaces" path="hardware/pixelworks/interfaces" revision="lineage-23.2" remote="github" />
 
-<!-- Bluetooth module: our fork carrying Jammy555's dual A2DP audio sharing -->
+<!-- Bluetooth module: our fork (dual A2DP audio sharing, QTI A2DP offload provider, aptX Adaptive, LDAC flow spec) -->
 <remove-project path="packages/modules/Bluetooth" />
 <project name="varakumar02/packages_modules_Bluetooth" path="packages/modules/Bluetooth" revision="aox" remote="github" />
 

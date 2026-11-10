@@ -37,7 +37,7 @@
 <!-- codesgning-->
 <project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox-lock" remote="github-ssh" />
 
-<project name="varakumar02/scripts" path="scripts" revision="aox-lock" remote="github-ssh">
+<project name="varakumar02/scripts" path="scripts" revision="aox" remote="github-ssh">
 <linkfile src="build/build.sh" dest="build.sh" />
 <linkfile src="sync/track_changes.sh" dest="track_changes.sh" />
 <linkfile src="release/otauploader.sh" dest="otauploader.sh" />

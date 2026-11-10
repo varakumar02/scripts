@@ -35,7 +35,7 @@
 <project name="android_prebuilts_openeuicc-deps" path="prebuilts/openeuicc-deps" revision="540216793010cabc49782bd01844cd8dd28a4c7c" remote="angry" />
 
 <!-- codesgning-->
-<project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox" remote="github" />
+<project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox" remote="github-ssh" />
 
 <project name="varakumar02/scripts" path="scripts" revision="aox" remote="github">
 <linkfile src="build/build.sh" dest="build.sh" />

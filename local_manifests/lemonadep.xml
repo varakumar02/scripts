@@ -1,31 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-<!-- SSH remote for the private camera-blobs repo; build server authenticates with its own github.com SSH key -->
+<!-- SSH remote for every varakumar02 repo; build server authenticates with its own github.com SSH key -->
 <remote name="github-ssh" fetch="ssh://git@github.com/" />
 <!-- leomandne trees -->
-<project name="varakumar02/Levion_kernel_OP9" path="kernel/oneplus/sm8350" revision="aox-ksun" remote="github" />
-<project name="varakumar02/android_device_oneplus_lemonadep" path="device/oneplus/lemonadep" revision="aox" remote="github" />
-<project name="varakumar02/android_device_oneplus_sm8350-common" path="device/oneplus/sm8350-common" revision="aox" remote="github" />
-<project name="varakumar02/android_hardware_oplus" path="hardware/oplus" revision="aox" remote="github" />
-<project name="varakumar02/proprietary_vendor_oneplus_lemonadep" path="vendor/oneplus/lemonadep" revision="aox" remote="github" />
-<project name="varakumar02/proprietary_vendor_oneplus_sm8350-common" path="vendor/oneplus/sm8350-common" revision="test1" remote="github" />
-<project name="varakumar02/vendor_oneplus_dolby" path="vendor/sony/dolby" revision="aox" remote="github" />
-<project name="varakumar02/open_oplus_camera" path="vendor/oplus/camera" revision="aox" remote="github" />
+<project name="varakumar02/Levion_kernel_OP9" path="kernel/oneplus/sm8350" revision="aox-ksun" remote="github-ssh" />
+<project name="varakumar02/android_device_oneplus_lemonadep" path="device/oneplus/lemonadep" revision="aox" remote="github-ssh" />
+<project name="varakumar02/android_device_oneplus_sm8350-common" path="device/oneplus/sm8350-common" revision="aox" remote="github-ssh" />
+<project name="varakumar02/android_hardware_oplus" path="hardware/oplus" revision="aox" remote="github-ssh" />
+<project name="varakumar02/proprietary_vendor_oneplus_lemonadep" path="vendor/oneplus/lemonadep" revision="aox" remote="github-ssh" />
+<project name="varakumar02/proprietary_vendor_oneplus_sm8350-common" path="vendor/oneplus/sm8350-common" revision="test1" remote="github-ssh" />
+<project name="varakumar02/vendor_oneplus_dolby" path="vendor/sony/dolby" revision="aox" remote="github-ssh" />
+<project name="varakumar02/open_oplus_camera" path="vendor/oplus/camera" revision="aox" remote="github-ssh" />
 <project name="varakumar02/open_oplus_camera_blobs" path="vendor/oplus/camera-blobs" revision="aox" remote="github-ssh" />
 <project name="LineageOS/android_hardware_pixelworks_interfaces" path="hardware/pixelworks/interfaces" revision="lineage-23.2" remote="github" />
 
 <!-- Bluetooth module: our fork (dual A2DP audio sharing, QTI A2DP offload provider, aptX Adaptive, LDAC flow spec) -->
 <remove-project path="packages/modules/Bluetooth" />
-<project name="varakumar02/packages_modules_Bluetooth" path="packages/modules/Bluetooth" revision="aox" remote="github" />
+<project name="varakumar02/packages_modules_Bluetooth" path="packages/modules/Bluetooth" revision="aox" remote="github-ssh" />
 
 <!-- GhostWire (independent pentest app, included here) -->
-<project name="varakumar02/GhostWire" path="packages/apps/GhostWire" revision="aox" remote="github" />
+<project name="varakumar02/GhostWire" path="packages/apps/GhostWire" revision="aox" remote="github-ssh" />
 
 <!-- Datura firewall (port of esecoder/Datura-Firewall, included here) -->
-<project name="varakumar02/Datura-Firewall" path="packages/apps/Datura-Firewall" revision="aox" remote="github" />
+<project name="varakumar02/Datura-Firewall" path="packages/apps/Datura-Firewall" revision="aox" remote="github-ssh" />
 
 <!-- Advanced protection settings app (included here) -->
-<project name="varakumar02/PrivacySettings" path="packages/apps/PrivacySettings" revision="aox" remote="github" />
+<project name="varakumar02/PrivacySettings" path="packages/apps/PrivacySettings" revision="aox" remote="github-ssh" />
 
 <!-- OpenEUICC (eSIM profile manager for removable eUICC cards) and its prebuilt dependencies -->
 <remote name="angry" fetch="https://gitea.angry.im/PeterCxy/" />
@@ -35,9 +35,9 @@
 <project name="android_prebuilts_openeuicc-deps" path="prebuilts/openeuicc-deps" revision="540216793010cabc49782bd01844cd8dd28a4c7c" remote="angry" />
 
 <!-- codesgning-->
-<project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox" remote="github" />
+<project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox" remote="github-ssh" />
 
-<project name="varakumar02/scripts" path="scripts" revision="aox" remote="github">
+<project name="varakumar02/scripts" path="scripts" revision="aox" remote="github-ssh">
 <linkfile src="build/build.sh" dest="build.sh" />
 <linkfile src="sync/track_changes.sh" dest="track_changes.sh" />
 <linkfile src="release/otauploader.sh" dest="otauploader.sh" />

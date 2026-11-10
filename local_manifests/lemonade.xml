@@ -5,7 +5,7 @@
 <!-- leomandne trees -->
 <project name="varakumar02/Levion_kernel_OP9" path="kernel/oneplus/sm8350" revision="aox-ksun" remote="github" />
 <project name="varakumar02/android_device_oneplus_lemonade" path="device/oneplus/lemonade" revision="aox" remote="github" />
-<project name="varakumar02/android_device_oneplus_sm8350-common" path="device/oneplus/sm8350-common" revision="aox" remote="github" />
+<project name="varakumar02/android_device_oneplus_sm8350-common" path="device/oneplus/sm8350-common" revision="aox-lock" remote="github" />
 <project name="varakumar02/android_hardware_oplus" path="hardware/oplus" revision="aox" remote="github" />
 <project name="varakumar02/proprietary_vendor_oneplus_lemonade" path="vendor/oneplus/lemonade" revision="aox" remote="github" />
 <project name="varakumar02/proprietary_vendor_oneplus_sm8350-common" path="vendor/oneplus/sm8350-common" revision="aox" remote="github" />
@@ -35,9 +35,9 @@
 <project name="android_prebuilts_openeuicc-deps" path="prebuilts/openeuicc-deps" revision="540216793010cabc49782bd01844cd8dd28a4c7c" remote="angry" />
 
 <!-- codesgning-->
-<project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox" remote="github" />
+<project name="varakumar02/vendor_aox-priv_keys-template" path="vendor/lineage-priv/keys" revision="aox-lock" remote="github-ssh" />
 
-<project name="varakumar02/scripts" path="scripts" revision="aox" remote="github">
+<project name="varakumar02/scripts" path="scripts" revision="aox-lock" remote="github">
 <linkfile src="build/build.sh" dest="build.sh" />
 <linkfile src="sync/track_changes.sh" dest="track_changes.sh" />
 <linkfile src="release/otauploader.sh" dest="otauploader.sh" />

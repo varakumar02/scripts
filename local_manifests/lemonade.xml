@@ -3,7 +3,7 @@
 <!-- SSH remote for every varakumar02 repo; build server authenticates with its own github.com SSH key -->
 <remote name="github-ssh" fetch="ssh://git@github.com/" />
 <!-- leomandne trees -->
-<project name="varakumar02/Levion_kernel_OP9" path="kernel/oneplus/sm8350" revision="aox-ksun-xbllog" remote="github-ssh" />
+<project name="varakumar02/Levion_kernel_OP9" path="kernel/oneplus/sm8350" revision="aox-ksun" remote="github-ssh" />
 <project name="varakumar02/android_device_oneplus_lemonade" path="device/oneplus/lemonade" revision="aox" remote="github-ssh" />
 <project name="varakumar02/android_device_oneplus_sm8350-common" path="device/oneplus/sm8350-common" revision="aox-lock" remote="github-ssh" />
 <project name="varakumar02/android_hardware_oplus" path="hardware/oplus" revision="aox" remote="github-ssh" />

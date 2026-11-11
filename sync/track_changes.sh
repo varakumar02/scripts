@@ -672,7 +672,11 @@ COMMON_DIR="device/oneplus/sm8350-common"
 KERNEL_KBUILD="kernel/oneplus/sm8350/drivers/staging/ksu-next/Kbuild"
 APK_HELPER="${REPO_ROOT}/build/prebuilt_apk.py"
 
-gh_json() { curl -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: reposcan" "https://api.github.com/$1"; }
+gh_json() {
+  local tok="${GH_TOKEN:-${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}}"
+  curl -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: reposcan" \
+    ${tok:+-H "Authorization: Bearer $tok"} "https://api.github.com/$1"
+}
 
 sync_brave() {
   local dest="$1" json pick ver url cur tmp want got
@@ -714,8 +718,7 @@ sync_ksun() {
     rm -f "$dest/KSUNManager.apk" "$dest/KSUNManager.apk.version"; return 0
   fi
   if ! rel="$(gh_json "repos/${KSUN_REPO}/releases/tags/${tag}")"; then
-    echo "  ${C_YELLOW}KSUN: release ${tag} not found — removing manager APK${C_RESET}"
-    rm -f "$dest/KSUNManager.apk" "$dest/KSUNManager.apk.version"; return 0
+    echo "  ${C_YELLOW}KSUN: API unreachable (rate limit?) — keeping existing APK${C_RESET}"; return 0
   fi
   cur="$(cat "$dest/KSUNManager.apk.version" 2>/dev/null || true)"
   if [[ "$tag" == "$cur" && -f "$dest/KSUNManager.apk" ]]; then

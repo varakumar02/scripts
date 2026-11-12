@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-CHANGELOG_URL="https://raw.githubusercontent.com/varakumar02/scripts/aox/OTA/GMS/changelogs_op9.txt"
+CHANGELOG_URL="https://raw.githubusercontent.com/varakumar02/scripts/refs/heads/aox/OTA/GMS/changelogs_op9.md"
 COMMUNITY_URL="https://t.me/axionos_op9"
 
 abort() { echo "error: $*" >&2; exit 1; }

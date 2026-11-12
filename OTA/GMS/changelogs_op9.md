@@ -1,3 +1,74 @@
+## Nov 12
+
+**Levion Kernel:**
+- Built with **PGO (Profile-Guided Optimization)** using a committed kernel profile (**3-12% increase in kernel speed**)
+- Added newer **MPTCP Next**
+- Included **modules inside the kernel itself**, which might result in **fewer small bugs**
+- Dozens of **Qualcomm Wi-Fi fixes** for NULL pointer, out-of-bounds, uninitialized variable and race issues
+- Fixed **Tristate slider bar** issue
+- **Max brightness level lowered to 2047**
+- Faster **LZ4 decompression**: upgraded to **LZ4 v1.10.0** with **ARM64 v8 assembly**, also used by incfs and crypto
+- **schedutil** now updates the target frequency when cpufreq limits change
+- **Scheduler, memory and filesystem tweaks**: faster mbcache, kernfs, dcache and cpumask paths, fewer needless RT push attempts, better shared block tag performance
+- **Binder allocator** backported from android13-5.15, with an **OOM mitigation**
+- Many **Adreno (KGSL)** fixes: GPU boot and slumber handling, spinlock recursion, page pool and shrinker accounting, wait-timestamp timeouts
+- **Haptics** now use non-OOS vmax, level and gain; **lower vibration latency**
+- Added **host-less 24-bit audio formats**
+- Fixed **TDM group ID, AMR-WB ioctl** and **ASF packet length** checks
+- **Video decode batching** disabled
+- **UVC webcam gadget** updated from android16-6.12, replacing the legacy g_webcam
+- **FM radio reference node** disabled on lemonade
+- **Download mode** armed by default for RAM dumps
+- **ramoops** re-setup, plus a dump of the **XBL/UEFI boot log**
+
+**Credits:**
+- @Madara273: For MPTCP, including kernel modules in the kernel, and more
+- @Deadpool-2003: For testing and providing PGO profiles for the OnePlus 9 Pro
+
+**Bluetooth**
+- Added LE Audio support
+- A2DP offload now runs on the Qualcomm Bluetooth audio HAL
+- Added aptX Adaptive (offload only) with a low latency switch, ranked above LDAC
+- Offloaded LDAC adaptive bit rate capped at Standard quality (660 kbps)
+- Added OxygenOS AAC and AAC VBR interop entries for better headset compatibility
+- Fixed audio glitching when an A2DP device disconnects mid-stream
+
+**Audio Sharing**
+- Reworked the screen with a single switch and a sharing codec choice
+- Shares the best codec both headsets support instead of falling back to SBC
+- Better quality on a shared stream: AAC and LDAC adaptive bit rate, high quality SBC bitpool
+- Lip sync adjustment with Off / Auto / Manual modes and a per-headset slider
+- Swap roles between headsets by switching the active device
+- Reconnects all headsets after switching and stops sharing when no headset is active
+
+**Audio**
+- Updated Dolby engine with spatializer support
+- Raise to reduce ringtone now triggers on a 50° tilt
+
+**Camera**
+- Added the Grand Tour beach and glazed tile filters
+- Fixed the high-contrast B&W filters
+
+**Privacy**
+- Advanced protection is now searchable from Settings
+- New Tracking section: copied-link cleaning and advertising ID
+- Tracking parameters are stripped from copied links
+- Advertising ID permissions are never granted to apps
+
+**Security**
+- Enabled verified boot with a new AVB signing key
+- Added OEM unlock support, allowed by default after an FRP format
+
+**System**
+- Boot now uses drivers built into the kernel, with vendor_dlkm on ext4
+- Qualcomm config service now reads its presets from /vendor/etc
+- Fixed SELinux denials for system_app and the Bluetooth HAL
+
+**Credits**
+- @SuperJammy: Good Audio Sharing features
+
+---
+
 ## Nov 3
 
 - Reverted display colors to normal

@@ -21,10 +21,6 @@
 - **Download mode** armed by default for RAM dumps
 - **ramoops** re-setup, plus a dump of the **XBL/UEFI boot log**
 
-**Credits:**
-- @Madara273: For MPTCP, including kernel modules in the kernel, and more
-- @Deadpool-2003: For testing and providing PGO profiles for the OnePlus 9 Pro
-
 **Bluetooth**
 - Added LE Audio support
 - A2DP offload now runs on the Qualcomm Bluetooth audio HAL
@@ -66,7 +62,8 @@
 
 **Credits**
 - @SuperJammy: Good Audio Sharing features
-
+- @Madara273: For MPTCP, including kernel modules in the kernel, and more
+- @Deadpool-2003: For testing and providing PGO profiles for the OnePlus 9 Pro
 ---
 
 ## Nov 3

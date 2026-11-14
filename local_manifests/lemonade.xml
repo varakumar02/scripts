@@ -19,7 +19,7 @@
 <project name="varakumar02/packages_modules_Bluetooth" path="packages/modules/Bluetooth" revision="aox" remote="github-ssh" />
 
 <!-- GhostWire (independent pentest app, included here) -->
-<project name="varakumar02/GhostWire" path="packages/apps/GhostWire" revision="aox" remote="github-ssh" />
+<project name="varakumar02/GhostWire" path="packages/apps/GhostWire" revision="main" remote="github-ssh" />
 
 <!-- Datura firewall (port of esecoder/Datura-Firewall, included here) -->
 <project name="varakumar02/Datura-Firewall" path="packages/apps/Datura-Firewall" revision="aox" remote="github-ssh" />

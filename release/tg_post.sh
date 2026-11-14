@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tg_post.sh — announce a finished build in a Telegram group with a Download
-# button, and above it Changelog, Community and Recovery (the recovery/ folder
-# beside the zip on pixeldrain, when it is shared). Reads the OTA manifest
+# button, and above it Community and Recovery (the recovery/ folder beside the
+# zip on pixeldrain, when it is shared). The changelog is a text link inside
+# the message ({changelog} in the template). Reads the OTA manifest
 # otauploader.sh wrote (OTA/<flavor>/<device>.json), renders tg_message.txt,
 # shows the exact message + link status, asks, then sends.
 #
@@ -27,7 +28,7 @@
 #   ./tg_post.sh --text "..." --button "Changelog|https://example.com"   # add a button
 #   ./tg_post.sh -e --text ""         # write the message in $EDITOR
 #   ./tg_post.sh -y                   # skip the confirm prompt
-# Template placeholders: {device} {version} {date} {filename} {size} {url} {romtype} {notes} {longdate} {hashname} {hash} {variant} {model} {beta}
+# Template placeholders: {device} {version} {date} {filename} {size} {url} {romtype} {notes} {longdate} {hashname} {hash} {variant} {model} {beta} {changelog}
 # Message is parse_mode=HTML (<b> <i> <code> <a href>); values are escaped for you.
 set -euo pipefail
 
@@ -50,12 +51,12 @@ while [[ $# -gt 0 ]]; do
         --button) BUTTON="$2"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         -y) YES=1; shift ;;
-        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
 done
 
-CHANGELOG_URL="https://raw.githubusercontent.com/varakumar02/scripts/refs/heads/aox/OTA/GMS/changelogs_op9.md"
+CHANGELOG_URL="https://github.com/varakumar02/scripts/blob/aox/OTA/GMS/changelogs_op9.md"
 COMMUNITY_URL="https://t.me/axionos_op9"
 
 abort() { echo "error: $*" >&2; exit 1; }
@@ -76,9 +77,9 @@ if (( CUSTOM )); then
     MSG="$TEXT"
     if [[ -n $BUTTON ]]; then BTN_LABEL="${BUTTON%%|*}"; URL="${BUTTON#*|}"; else BTN_LABEL=""; URL=""; fi
 else
-    OUT=$(python3 - "$JSON" "$TEMPLATE" "$NOTES" "$URL" "$FLAVOR" "$DEVICE" "$MD5" "$BETA" <<'PY'
+    OUT=$(python3 - "$JSON" "$TEMPLATE" "$NOTES" "$URL" "$FLAVOR" "$DEVICE" "$MD5" "$BETA" "$CHANGELOG_URL" <<'PY'
 import json, sys, html, datetime, re, hashlib, subprocess, email.utils
-jf, tf, notes, url, flavor, device, md5, beta = sys.argv[1:9]
+jf, tf, notes, url, flavor, device, md5, beta, changelog = sys.argv[1:10]
 if url:  # --url: describe the file the link actually points to, not the manifest
     name = url.rsplit("/", 1)[-1].split("?")[0]
     hn, hv = "MD5", md5
@@ -163,6 +164,7 @@ v["longdate"] = f"{d.day}{sfx} {d:%B %Y}"
 v["hashname"], v["hash"] = r.get("hn", "MD5"), r["id"]  # manifest "id" is assumed to be the zip's md5
 v["variant"] = "GAPPS (Google Apps Included)" if flavor == "GMS" else "VANILLA (No Google Apps)"
 v["beta"] = "BETA " if beta == "1" else ""
+v["changelog"] = changelog
 v["model"] = "Oneplus 9 Pro" if v["device"] == "lemonadep" else "Oneplus 9"
 t = open(tf, encoding="utf-8").read()
 for k, val in v.items():
@@ -179,7 +181,7 @@ PY
     MSG=${REST#*$'\n'}
     [[ -n $URL ]] || URL=${OUT%%$'\n'*}
     BTN_LABEL="⬇ Download"
-    ROW2=1   # release posts also get Changelog | Community | Recovery above the Download button
+    ROW2=1   # release posts also get Community | Recovery above the Download button
 fi
 
 if (( EDIT )); then
@@ -207,8 +209,7 @@ echo "chat:    $TG_CHAT_ID"
 [[ -f $SCRIPT_DIR/tg_banner.png ]] && echo "image:   tg_banner.png"
 if [[ -n $URL ]]; then
     if (( ROW2 )); then
-        echo "button:  [📝 Changelog] -> $CHANGELOG_URL"
-        echo "         [💬 Community] -> $COMMUNITY_URL"
+        echo "button:  [💬 Community] -> $COMMUNITY_URL"
         [[ -n $RECOVERY_URL ]] && echo "         [🛠 Recovery] -> $RECOVERY_URL"
         echo "         (one row, above Download)"
         [[ -n $RECOVERY_SKIP ]] && echo "         no Recovery button: $RECOVERY_SKIP is missing or not shared"
@@ -228,9 +229,9 @@ if (( ! YES )); then read -rp "Send to Telegram? [y/N] " reply; [[ $reply =~ ^[Y
 EXTRA=()
 [[ -n $URL ]] && EXTRA=(--form-string "reply_markup=$(python3 -c 'import json,sys; kb=[[{"text":sys.argv[1],"url":sys.argv[2]}]]
 if sys.argv[3]=="1":
-    kb.insert(0,[{"text":"📝 Changelog","url":sys.argv[4]},{"text":"💬 Community","url":sys.argv[5]}])
-    if sys.argv[6]: kb[0].append({"text":"🛠 Recovery","url":sys.argv[6]})
-print(json.dumps({"inline_keyboard":kb}))' "$BTN_LABEL" "$URL" "$ROW2" "$CHANGELOG_URL" "$COMMUNITY_URL" "$RECOVERY_URL")")
+    kb.insert(0,[{"text":"💬 Community","url":sys.argv[4]}])
+    if sys.argv[5]: kb[0].append({"text":"🛠 Recovery","url":sys.argv[5]})
+print(json.dumps({"inline_keyboard":kb}))' "$BTN_LABEL" "$URL" "$ROW2" "$COMMUNITY_URL" "$RECOVERY_URL")")
 # Banner goes out as a photo with the message as its caption (1024-char limit,
 # so longer messages fall back to plain text). tg_banner.png is a 1920px copy of
 # axion.png: sendPhoto rejects files over 10 MB.

@@ -6,6 +6,8 @@ By <a href="https://t.me/Varakumar">T๏иy</a>
 ▫️ <b>Date:</b> {longdate}
 ▫️ <b>{hashname}:</b> <code>{hash}</code>
 
+✨ <b>What's New?</b> ➜ <a href="{changelog}"><b>Read the Full Changelog</b></a> 📜
+
 <i>
 Note:
 - Reverted Display Colors to be normal

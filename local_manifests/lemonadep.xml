@@ -8,7 +8,7 @@
 <project name="varakumar02/android_device_oneplus_sm8350-common" path="device/oneplus/sm8350-common" revision="aox" remote="github-ssh" />
 <project name="varakumar02/android_hardware_oplus" path="hardware/oplus" revision="aox" remote="github-ssh" />
 <project name="varakumar02/proprietary_vendor_oneplus_lemonadep" path="vendor/oneplus/lemonadep" revision="aox" remote="github-ssh" />
-<project name="varakumar02/proprietary_vendor_oneplus_sm8350-common" path="vendor/oneplus/sm8350-common" revision="test1" remote="github-ssh" />
+<project name="varakumar02/proprietary_vendor_oneplus_sm8350-common" path="vendor/oneplus/sm8350-common" revision="aox" remote="github-ssh" />
 <project name="varakumar02/vendor_oneplus_dolby" path="vendor/sony/dolby" revision="aox" remote="github-ssh" />
 <project name="varakumar02/open_oplus_camera" path="vendor/oplus/camera" revision="aox" remote="github-ssh" />
 <project name="varakumar02/open_oplus_camera_blobs" path="vendor/oplus/camera-blobs" revision="aox" remote="github-ssh" />

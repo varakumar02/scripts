@@ -1,3 +1,55 @@
+## Nov 19
+
+- Spoofed Widevine systemId to bypass the blocklist
+- Stopped healthd's 10-minute wakeup on battery (saves battery)
+- Dropped the schedutil hispeed floor in post_boot
+- Stabilized Bluetooth A2DP sharing and HAL recovery
+- Switched to full AAC bitrate over HCI
+
+**Levion Kernel:**
+
+- Updated SUSFS to v2.4.0
+- Enabled ADIOS v3.3.0 as the default I/O scheduler (was BFQ)
+  - Worst-case read stalls while the storage is busy writing: ~65 ms -> ~9 ms (about 7x shorter, 86% faster)
+  - Longest single stall: 84 ms -> 13 ms (85% faster)
+  - Reads on an idle disk: 5-12% faster, 8% more reads per second
+  - Steadier: no more big lag spikes during downloads, installs or updates
+  - Trade-off: heavy app launches during big background writes can be ~10% slower (Gallery), light ones slightly faster (Settings)
+- Newer CASS version
+- Enabled BaseBand-Guard (BBG) - Additional Security
+- Added ~400 security fixes
+- Faster task switching: memory cleanup now happens asynchronously
+- Added IPv6 hop-limit firewall support
+- Enabled checkpoint/restore support
+- Fixed suspend clock sampling for more accurate sleep stats
+- Fixed unnecessary Wi-Fi IGMP offload requests
+- Fixed TCP pacing conflicts with BBR
+- Fixed tri-state alert slider reliability issues
+- Re-enabled binder freeze support
+- Restored standard `process_madvise` behavior
+- Added a DNS optimizer for faster lookups
+- Reverted threaded NAPI on IPA and the Wi-Fi driver for stability
+- Reverted a recent energy model retune for better stability
+- Fixed a OnePlus 9 Pro (lemonadev) device config issue
+- Smaller, modules-less kernel builds that skip vendor_dlkm entirely
+- Fixed DC-dimming brightness scaling on both display panels
+- Standardized vendor_dlkm to ext4 only
+- Built with the latest Neutron Clang toolchain
+- Reverted recent double-tap-to-wake touchscreen changes for stability
+- Added XBL/UEFI boot log dumping for better crash diagnostics
+
+**GhostWire App:**
+
+- Enabled Observe Mode in NFC (passive RF sniffing)
+- Added NFC card emulation from saved cards
+- Added NFC auto-scan with GPS tagging and a recycle bin for deleted cards
+- Enabled full Wi-Fi pentesting support: monitor mode, deauth, and handshake capture
+- Added PMKID capture with a live attack log
+- Added WPA/WPS cracking (reaver, wash, bully)
+- Added a library for saved handshakes, cracked keys, and wordlists
+- Added export of cracked Wi-Fi keys directly to Android Wi-Fi
+- Fixed the CI/build pipeline — now auto-publishes APK releases
+
 ## Nov 12
 
 **Levion Kernel:**

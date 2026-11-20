@@ -82,6 +82,25 @@ OFFLINE = "😴 I was offline when you sent this, here you go:"
 STALE_AFTER = 120     # seconds; an older command was queued by Telegram while the bot was down
 NO_ARGS = {"notes", "changelog", "cmds", "status", "ping", "storage"}
 
+# descriptions for Telegram's "/" menu; names Telegram can't take (post!) stay out of it
+MENU_DESC = {
+    "builds": "Newest builds", "bug": "Report a bug", "bugs": "Open bugs", "editbug": "Edit a bug report",
+    "changelog": "Latest changelog", "ping": "Is the bot alive", "cmds": "Custom commands", "notes": "All commands",
+    "status": "Pi status", "sh": "Run a shell command", "post": "Dry-run a release post", "setbuild": "Mark a release post",
+    "update": "Pull and restart the bot", "resolve": "Resolve bugs", "storage": "Storage report",
+    "addcmd": "Add a custom command", "delcmd": "Remove a custom command",
+}
+
+
+def menus(cmds):
+    """{tier: [BotCommand]} for setMyCommands; each tier includes the ones below it."""
+    item = lambda n, d: {"command": n, "description": d[:256] or n}
+    custom = lambda access: [item(n, c.get("caption") or "Custom command") for n, c in sorted(cmds.items()) if c["access"] == access]
+    public = [item(n, MENU_DESC[n]) for n in sorted(BUILTIN_PUBLIC - {"start"})] + custom("public")
+    admin = public + custom("admin")
+    owner = admin + [item(n, MENU_DESC[n]) for n in sorted(BUILTIN_OWNER) if NAME_RE.match(n)] + custom("owner")
+    return {"public": public, "admin": admin, "owner": owner}
+
 
 def tg_len(text):
     """Length as Telegram counts a parse_mode=HTML caption: tags dropped, entities decoded, UTF-16 units."""
@@ -345,8 +364,23 @@ class Bot:
 
     # -- update loop
 
+    def sync_menu(self):
+        """Telegram's "/" menu shows each person only what they may run: everyone the public list, group
+        admins the admin list, the owner everything (in the group and in PM)."""
+        m = menus(self.reg.cmds)
+        for scope, tier in (({"type": "default"}, "public"),
+                            ({"type": "chat_administrators", "chat_id": self.group}, "admin"),
+                            ({"type": "chat_member", "chat_id": self.group, "user_id": self.owner}, "owner"),
+                            ({"type": "chat", "chat_id": self.owner}, "owner")):
+            if self.owner or tier != "owner":
+                try:
+                    self.api("setMyCommands", commands=m[tier], scope=scope)
+                except RuntimeError as e:
+                    print("setMyCommands:", e, file=sys.stderr, flush=True)
+
     def run(self):
         self.offset = None
+        self.sync_menu()
         self.announce_restart()
         print(f"@{self.me} up; group {self.group}, owner {self.owner or 'UNSET'}", flush=True)
         while True:
@@ -763,7 +797,7 @@ class Bot:
         parts = line.split(None, 2)
         err = (self.reg.add(*(parts + [""] * (3 - len(parts))), caption.strip()) if len(parts) >= 2
                else "usage: /addcmd <name> <public|admin|owner> <command line> [## caption]")
-        self.meh(chat, mid, err) if err else self.say(chat, f"added /{parts[0]} ({parts[1]})", mid)
+        self.meh(chat, mid, err) if err else (self.sync_menu(), self.say(chat, f"added /{parts[0]} ({parts[1]})", mid))
 
     def cmd_setbuild(self, chat, mid, rest, owner, msg):
         post = msg.get("reply_to_message")
@@ -883,10 +917,16 @@ class Bot:
 
     def cmd_delcmd(self, chat, mid, rest, owner, msg):
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
-        self.meh(chat, mid, err) if err else self.say(chat, f"removed /{rest}", mid)
+        self.meh(chat, mid, err) if err else (self.sync_menu(), self.say(chat, f"removed /{rest}", mid))
 
 
 def selftest():
+    m = menus({"a": {"access": "admin", "cmd": "x"}, "o": {"access": "owner", "cmd": "y", "caption": "cap"}})
+    names = lambda t: [c["command"] for c in m[t]]
+    assert "a" not in names("public") and "a" in names("admin") and "update" not in names("admin")
+    assert "post!" not in names("owner") and {"update", "a", "o"} <= set(names("owner"))
+    assert all(NAME_RE.match(c["command"]) and 0 < len(c["description"]) <= 256 for c in m["owner"])
+    assert set(MENU_DESC) >= (BUILTIN_PUBLIC | BUILTIN_OWNER) - {"start", "post!"}
     assert parse_command("/notes", "axbot") == ("notes", "", False)
     assert parse_command("/builds\nlemonade", "axbot") == ("builds", "lemonade", False)
     assert parse_command("/", "axbot") == ("", "", False) and parse_command("/@axbot", "axbot") == ("", "", True)

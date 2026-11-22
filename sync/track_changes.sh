@@ -665,6 +665,10 @@ print_time_window_details() {
 #           stripped); the spoofed manager, verified against the signing
 #           cert the kernel pins. Tag missing/not released -> the manager
 #           APK is removed so it drops out of the build.
+# SYNC_PREBUILT_APKS=false (the default, for official builds) fetches
+# nothing and deletes any APK fetched earlier, so neither app is built in.
+# Run with SYNC_PREBUILT_APKS=true to ship them again.
+SYNC_PREBUILT_APKS="${SYNC_PREBUILT_APKS:-false}"
 KSUN_REPO="KernelSU-Next/KernelSU-Next"
 KSUN_CERT_SHA256="79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7"
 BRAVE_REPO="brave/brave-browser"
@@ -747,6 +751,12 @@ sync_apks() {
     echo ""; echo "${C_YELLOW}==> prebuilt APK sync skipped: need curl and python3${C_RESET}"; return 0
   fi
   local dest="${COMMON_DIR}/prebuilt-apps"
+  if [[ "$SYNC_PREBUILT_APKS" != "true" ]]; then
+    rm -f "$dest"/Brave.apk "$dest"/Brave.apk.version \
+          "$dest"/KSUNManager.apk "$dest"/KSUNManager.apk.version
+    echo ""; echo "==> Prebuilt APK sync off (SYNC_PREBUILT_APKS=false): Brave and KSUN manager removed from ${dest}"
+    return 0
+  fi
   mkdir -p "$dest"
   echo ""
   echo "${C_BOLD}==> Prebuilt APK sync (${dest})${C_RESET}"

@@ -28,6 +28,11 @@
 #   ./tg_post.sh --text "..." --button "Changelog|https://example.com"   # add a button
 #   ./tg_post.sh -e --text ""         # write the message in $EDITOR
 #   ./tg_post.sh -y                   # skip the confirm prompt
+#   Official post text (prints the message only, sends nothing):
+#   ./tg_post.sh -o [--device lemonadep] [--official-dir <path>]
+#     reads OTA/{GMS,VANILLA}/<device>.json and the newest "Build Date" in
+#     OTA/CHANGELOG/<device>.txt from official_devices (default: the ROM tree's
+#     vendor/official_devices, else ../official_devices beside this repo)
 # Template placeholders: {device} {version} {date} {filename} {size} {url} {romtype} {notes} {longdate} {hashname} {hash} {variant} {model} {beta} {changelog}
 # Message is parse_mode=HTML (<b> <i> <code> <a href>); values are escaped for you.
 set -euo pipefail
@@ -36,6 +41,7 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 [[ -f "$REPO_ROOT/.env" ]] && { set -a; . "$REPO_ROOT/.env"; set +a; }
 
+OFFICIAL=0 OFFICIAL_DIR=""
 DEVICE=lemonade FLAVOR=GMS URL="" TEMPLATE="$SCRIPT_DIR/tg_message.txt" NOTES="" MD5="" TEXT="" BUTTON="" RECOVERY_URL="" BETA=0 ROW2=0 CUSTOM=0 EDIT=0 DRY=0 YES=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,7 +57,9 @@ while [[ $# -gt 0 ]]; do
         --button) BUTTON="$2"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         -y) YES=1; shift ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        -o) OFFICIAL=1; shift ;;
+        --official-dir) OFFICIAL_DIR="$2"; shift 2 ;;
+        -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -60,6 +68,46 @@ CHANGELOG_URL="https://github.com/varakumar02/scripts/blob/aox/OTA/GMS/changelog
 COMMUNITY_URL="https://t.me/axionos_op9"
 
 abort() { echo "error: $*" >&2; exit 1; }
+
+# -o: print the official release post for $DEVICE and stop.
+if (( OFFICIAL )); then
+    if [[ -z $OFFICIAL_DIR ]]; then
+        for d in "$REPO_ROOT/../vendor/official_devices" "$REPO_ROOT/../official_devices"; do
+            [[ -d $d/OTA ]] && { OFFICIAL_DIR=$d; break; }
+        done
+    fi
+    [[ -d $OFFICIAL_DIR/OTA ]] || abort "official_devices not found (pass --official-dir <path>)"
+    python3 - "$OFFICIAL_DIR" "$DEVICE" "$COMMUNITY_URL" <<'OFFICIAL_PY'
+import json, re, sys, datetime
+root, dev, support = sys.argv[1:4]
+def man(f):
+    try: return json.load(open(f"{root}/OTA/{f}/{dev}.json"))["response"][0]
+    except Exception as e: sys.exit(f"error: OTA/{f}/{dev}.json: {e}")
+g, v = man("GMS"), man("VANILLA")
+gb = lambda n: f"{n / 1024**3:.2f} GB"
+try: cl = open(f"{root}/OTA/CHANGELOG/{dev}.txt").read()
+except OSError: cl = ""
+m = re.search(r"Build Date: (\d+)/(\d+)/(\d+)", cl)
+d = datetime.date(int(m[3]), int(m[2]), int(m[1])) if m else \
+    datetime.datetime.fromtimestamp(g["datetime"], datetime.timezone.utc).date()
+sfx = "th" if 11 <= d.day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(d.day % 10, "th")
+model = "OnePlus 9 Pro" if dev == "lemonadep" else "OnePlus 9"
+print(f"""🚀 <b>AxionOS v{g['version']} {g['romtype']} — {model} ({dev})</b>
+By <a href="https://t.me/Varakumar">T๏иy</a>
+
+▫️ <b>Date:</b> {d.day}{sfx} {d:%B %Y}
+▫️ <b>GMS</b> {gb(g['size'])} · <b>Vanilla</b> {gb(v['size'])}
+
+<blockquote expandable>🔐 <b>MD5</b>
+<b>GMS</b>      <code>{g['id']}</code>
+<b>Vanilla</b>  <code>{v['id']}</code></blockquote>
+
+📜 <a href="https://github.com/AxionAOSP/axion_changelogs">Source</a> · <a href="https://github.com/AxionAOSP/official_devices/blob/main/OTA/CHANGELOG/{dev}.txt">Device</a>   🛠 <a href="https://pixeldrain.com/d/49oNHeMP">Recovery</a>   💬 <a href="{support}">Support group</a>
+
+#A16 #{dev} #Axion #LevionKernel""")
+OFFICIAL_PY
+    exit 0
+fi
 [[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] || abort "set TG_BOT_TOKEN and TG_CHAT_ID in $REPO_ROOT/.env (see .env.example)"
 JSON="$REPO_ROOT/OTA/$FLAVOR/$DEVICE.json"   # only read by the --url branch (MD5 shortcut)
 (( CUSTOM )) || {

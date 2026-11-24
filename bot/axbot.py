@@ -74,6 +74,10 @@ def post_device(text):
 # The whole reply to any wrong command: one of these, at random.
 MEH = ("😑", "👍", "😒", "😫", "😩", "🫨", "😬", "🥱", "🫪", "🥴", "😵\u200d💫", "😵")
 DENIED = "⛔ <b>Access Denied</b>"
+BUG_USAGE = ("🐛 <b>How to report a bug</b>\n"
+             "<code>/bug what's wrong</code>\n"
+             "or reply <code>/bug</code> (with an optional note) to a message or log to link it.\n"
+             "Reply <code>/bug 3</code> to another message to add its link to bug #3.")
 EDITBUG_USAGE = ("✏️ <b>How to edit a bug</b>\n"
                  "<code>/editbug 3 the new text</code>\n"
                  "or reply <code>/editbug 3</code> to a message to use its text.\n"
@@ -172,9 +176,9 @@ class BugBook:
     def save(self):
         dump_json(self.path, self.d)
 
-    def add(self, text, by, uid, chat, msg):
+    def add(self, text, by, uid, chat, msg, links=()):
         b = {"id": self.d["next"], "text": text, "by": by, "uid": uid, "chat": chat, "msg": msg,
-             "date": int(time.time()), "resolved": None}
+             "links": list(links), "date": int(time.time()), "resolved": None}
         self.d["next"] += 1
         self.d["bugs"].append(b)
         self.save()
@@ -306,6 +310,15 @@ def bug_ids(rest):
     """'3 #5, 7' -> [3, 5, 7]; None if anything else is in there."""
     toks = [t.lstrip("#") for t in re.split(r"[\s,]+", rest) if t]
     return [int(t) for t in toks] if toks and all(t.isdigit() for t in toks) else None
+
+
+def msg_link(m):
+    """t.me link to message m; None in a PM (no link exists)."""
+    c = m.get("chat", {})
+    if c.get("username"):
+        return f"https://t.me/{c['username']}/{m['message_id']}"
+    cid = str(c.get("id", ""))
+    return f"https://t.me/c/{cid[4:]}/{m['message_id']}" if cid.startswith("-100") else None
 
 
 class Bot:
@@ -706,18 +719,46 @@ class Bot:
             f"⚡️ Latency: {pd_ms}ms" if pd_ok else "⚡️ Latency: —"])
 
     def cmd_bug(self, chat, mid, rest, owner, msg):
-        reply = msg.get("reply_to_message") or {}
-        text = rest or reply.get("text") or reply.get("caption") or ""
+        """/bug <text>; as a reply also links the replied message (only that one, not its own reply chain).
+        Reply /bug <id> [note] to attach another message to an open bug."""
+        reply = msg.get("reply_to_message")
+        link = reply and msg_link(reply)
+        num, _, note = rest.partition(" ")
+        if num.lstrip("#").isdigit():                               # attach to an existing bug
+            b = self.bugs.get(int(num.lstrip("#")))
+            if not reply:
+                return self.say(chat, BUG_USAGE, mid)
+            if not b:
+                return self.say(chat, f"No open bug <b>#{html.escape(num.lstrip('#'))}</b>. See /bugs for the numbers.", mid)
+            if not self.may_edit(owner, msg, b):
+                return self.say(chat, DENIED, mid)
+            if link:
+                b.setdefault("links", []).append(link)
+            if note.strip():
+                b["text"] = (b["text"] + " · " + note.strip())[:1000]
+            self.bugs.save()
+            return self.say(chat, f"🔗 Added to bug\n{self.bug_line(b)}", mid)
+        reply = reply or {}
+        text = rest or reply.get("text") or reply.get("caption") or reply.get("document", {}).get("file_name") \
+            or ("(see message)" if link else "")
         if not text.strip():
-            return self.meh(chat, mid, "usage: /bug <what's wrong>, or reply /bug to a message")
+            return self.say(chat, BUG_USAGE, mid)
         f = msg.get("from", {})
         by = "@" + f["username"] if f.get("username") else f.get("first_name", "someone")
-        b = self.bugs.add(text.strip()[:1000], by, f.get("id"), chat, mid)
+        b = self.bugs.add(text.strip()[:1000], by, f.get("id"), chat, mid, [link] if link else [])
         self.say(chat, f"🐛 Bug <b>#{b['id']}</b> logged, thanks!", mid)
+
+    def may_edit(self, owner, msg, b):
+        """Reporter (not as a channel/anonymous admin), admins and owner may change a bug."""
+        uid = msg.get("from", {}).get("id")
+        return owner or ("sender_chat" not in msg and uid == b.get("uid")) or self.is_admin(msg)
 
     def bug_line(self, b):
         # emoji only to tell resolved ones apart in /bugs all; open bugs are plain lines
-        return f"{'✅ ' if b['resolved'] else ''}<b>#{b['id']}</b> {html.escape(b['text'])} — <i>{html.escape(b['by'])}</i>"
+        links = b.get("links", [])
+        refs = " ".join(f'<a href="{html.escape(l)}">{"msg" if len(links) == 1 else i}</a>' for i, l in enumerate(links, 1))
+        return (f"{'✅ ' if b['resolved'] else ''}<b>#{b['id']}</b> {html.escape(b['text'])} — <i>{html.escape(b['by'])}</i>"
+                + (f" · 🔗 {refs}" if refs else ""))
 
     def cmd_bugs(self, chat, mid, rest, owner, msg):
         if rest.lower() == "all":
@@ -750,8 +791,7 @@ class Bot:
         b = self.bugs.get(int(num.lstrip("#")))
         if not b:
             return self.say(chat, f"No open bug <b>#{html.escape(num.lstrip('#'))}</b>. See /bugs for the numbers.", mid)
-        uid = msg.get("from", {}).get("id")
-        if not (owner or ("sender_chat" not in msg and uid == b.get("uid")) or self.is_admin(msg)):
+        if not self.may_edit(owner, msg, b):
             return self.say(chat, DENIED, mid)
         b["text"] = text.strip()[:1000]
         self.bugs.save()
@@ -840,7 +880,7 @@ class Bot:
         changed, skipped = self.bugs.resolve(ids)
         for b in changed:                                           # tell the reporter, under their report
             self.say(b["chat"], f"✅ Bug <b>#{b['id']}</b> resolved", b["msg"])
-        out = ("✅ Resolved " + ", ".join(f"#{b['id']}" for b in changed)) if changed else ""
+        out = ("✅ <b>Resolved</b>\n" + "\n".join(self.bug_line(b) for b in changed)) if changed else ""
         if skipped:
             out += ("\n" if out else "") + "⚠️ Skipped, no open bug: " + ", ".join(f"#{i}" for i in skipped)
         self.say(chat, out, mid)
@@ -1024,7 +1064,23 @@ def selftest():
             return [t for _, t in out]
         assert send(5, "/bug camera <b>crash</b>", 10) == ["🐛 Bug <b>#1</b> logged, thanks!"]
         assert send(6, "/bug", 11, reply_to_message={"message_id": 9, "text": "wifi drops"})[0].startswith("🐛 Bug <b>#2</b>")
-        assert send(5, "/bug") == ["MEH"] and send(5, "/bug   ") == ["MEH"]
+        assert send(5, "/bug") == [BUG_USAGE] and send(5, "/bug   ") == [BUG_USAGE] and send(5, "/bug 2 x") == [BUG_USAGE]
+        g = {"id": -1001234567890, "type": "supergroup"}
+        doc = {"message_id": 40, "chat": g, "document": {"file_name": "logcat.txt"},
+               "reply_to_message": {"message_id": 39, "chat": g, "text": "older"}}
+        assert send(5, "/bug ringtone drops", 12, reply_to_message=doc)[0].startswith("🐛 Bug <b>#3</b>")
+        assert b.bugs.get(3)["text"] == "ringtone drops" and b.bugs.get(3)["links"] == ["https://t.me/c/1234567890/40"]
+        assert send(5, "/bug", 13, reply_to_message={"message_id": 41, "chat": g, "document": {"file_name": "dmesg.txt"}})[0].startswith("🐛 Bug <b>#4</b>")
+        assert b.bugs.get(4)["text"] == "dmesg.txt"
+        o = send(5, "/bug #3 after a call", 14, reply_to_message={"message_id": 42, "chat": {**g, "username": "axg"}, "text": "x"})[0]
+        assert o.startswith("🔗") and b.bugs.get(3)["links"][1] == "https://t.me/axg/42" and b.bugs.get(3)["text"] == "ringtone drops · after a call", o
+        assert '<a href="https://t.me/c/1234567890/40">1</a> <a href="https://t.me/axg/42">2</a>' in o
+        assert send(8, "/bug 3", reply_to_message={"message_id": 43, "chat": g}) == [DENIED]
+        assert send(5, "/bug 99", reply_to_message={"message_id": 43, "chat": g})[0].startswith("No open bug <b>#99")
+        assert send(5, "/bug x", 15, reply_to_message={"message_id": 44, "chat": {"id": 5, "type": "private"}})[0].startswith("🐛")
+        assert b.bugs.get(5)["links"] == []                                                       # PM: no link
+        assert 'msg</a>' in b.bug_line(b.bugs.get(4)) and "🔗" not in b.bug_line({"id": 9, "text": "old", "by": "@a", "resolved": None})
+        b.bugs.resolve([3, 4, 5])
         o = send(5, "/bugs")[0]
         assert "#2</b> wifi drops — <i>@u6</i>" in o and o.startswith("🐛 <b>Open bugs</b> · 2") and "camera &lt;b&gt;crash" in o and o.index("#2") < o.index("#1"), o
         assert send(5, "/bugs all") == [DENIED] and send(5, "/resolve 1") == [DENIED] and send(5, "/bugs 1") == ["MEH"]
@@ -1037,14 +1093,14 @@ def selftest():
         assert send(5, "/editbug") == [EDITBUG_USAGE] and send(5, "/editbug 99 x")[0].startswith("No open bug <b>#99")
         assert send(5, "/reopen 1") == []      # removed
         o = send(7, "/resolve #1, 9 1")
-        assert o[0] == "✅ Bug <b>#1</b> resolved" and out[0][0] == -100 and "Resolved #1" in o[1] and "#9" in o[1], o
+        assert o[0] == "✅ Bug <b>#1</b> resolved" and out[0][0] == -100 and "<b>Resolved</b>\n✅ <b>#1</b> by admin" in o[1] and "#9" in o[1], o
         assert "#1" not in send(5, "/bugs")[0] and "#1" in send(7, "/bugs all")[0]
         assert "Skipped, no open bug: #1" in send(7, "/resolve 1")[0]
         assert [x["id"] for x in load_json(BUGS, {})["bugs"]] == [2]                 # open file: open only
-        assert [x["id"] for x in load_json(BUGS.replace(".json", "-resolved.json"), [])] == [1]
+        assert [x["id"] for x in load_json(BUGS.replace(".json", "-resolved.json"), [])] == [3, 4, 5, 1]
         assert send(5, "/editbug 1 too late")[0].startswith("No open bug <b>#1")                              # resolved: not editable
         assert send(7, "/resolve") == ["MEH"] and send(7, "/resolve one") == ["MEH"]
-        assert BugBook(BUGS).d["next"] == 3 and bug_ids("3 #5,7") == [3, 5, 7] and bug_ids("3 x") is None
+        assert BugBook(BUGS).d["next"] == 6 and bug_ids("3 #5,7") == [3, 5, 7] and bug_ids("3 x") is None
         b.started = time.time() - 90061
         assert span(90061) == "1d 1h 1m" and send(5, "/ping x") == ["MEH"]
         assert light(True, 300) == "🟢 300ms" and light(True, 2000, True) == "🟡 SLOW" and light(False, 9, True) == "🔴 OFFLINE"

@@ -28,7 +28,8 @@
 #   ./tg_post.sh --text "..." --button "Changelog|https://example.com"   # add a button
 #   ./tg_post.sh -e --text ""         # write the message in $EDITOR
 #   ./tg_post.sh -y                   # skip the confirm prompt
-#   Official post text (prints the message only, sends nothing):
+#   ./tg_post.sh --no-pin             # send, but do not pin (test posts)
+#   Official release post (Community button above GMS | Vanilla, pinned for /builds):
 #   ./tg_post.sh -o [--device lemonadep] [--official-dir <path>]
 #     reads OTA/{GMS,VANILLA}/<device>.json and the newest "Build Date" in
 #     OTA/CHANGELOG/<device>.txt from official_devices (default: the ROM tree's
@@ -42,7 +43,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 [[ -f "$REPO_ROOT/.env" ]] && { set -a; . "$REPO_ROOT/.env"; set +a; }
 
 OFFICIAL=0 OFFICIAL_DIR=""
-DEVICE=lemonade FLAVOR=GMS URL="" TEMPLATE="$SCRIPT_DIR/tg_message.txt" NOTES="" MD5="" TEXT="" BUTTON="" RECOVERY_URL="" BETA=0 ROW2=0 CUSTOM=0 EDIT=0 DRY=0 YES=0
+DEVICE=lemonade FLAVOR=GMS URL="" TEMPLATE="$SCRIPT_DIR/tg_message.txt" NOTES="" MD5="" TEXT="" BUTTON="" RECOVERY_URL="" URL2="" BTN2_LABEL="" PIN=1 BETA=0 ROW2=0 CUSTOM=0 EDIT=0 DRY=0 YES=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --device) DEVICE="$2"; shift 2 ;;
@@ -57,9 +58,10 @@ while [[ $# -gt 0 ]]; do
         --button) BUTTON="$2"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         -y) YES=1; shift ;;
+        --no-pin) PIN=0; shift ;;
         -o) OFFICIAL=1; shift ;;
         --official-dir) OFFICIAL_DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -69,7 +71,7 @@ COMMUNITY_URL="https://t.me/axionos_op9"
 
 abort() { echo "error: $*" >&2; exit 1; }
 
-# -o: print the official release post for $DEVICE and stop.
+# -o: the official release post for $DEVICE, buttons from the official OTA json.
 if (( OFFICIAL )); then
     if [[ -z $OFFICIAL_DIR ]]; then
         for d in "$REPO_ROOT/../vendor/official_devices" "$REPO_ROOT/../official_devices"; do
@@ -77,7 +79,7 @@ if (( OFFICIAL )); then
         done
     fi
     [[ -d $OFFICIAL_DIR/OTA ]] || abort "official_devices not found (pass --official-dir <path>)"
-    python3 - "$OFFICIAL_DIR" "$DEVICE" "$COMMUNITY_URL" <<'OFFICIAL_PY'
+    OUT=$(python3 - "$OFFICIAL_DIR" "$DEVICE" "$COMMUNITY_URL" <<'OFFICIAL_PY'
 import json, re, sys, datetime
 root, dev, support = sys.argv[1:4]
 def man(f):
@@ -92,6 +94,7 @@ d = datetime.date(int(m[3]), int(m[2]), int(m[1])) if m else \
     datetime.datetime.fromtimestamp(g["datetime"], datetime.timezone.utc).date()
 sfx = "th" if 11 <= d.day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(d.day % 10, "th")
 model = "OnePlus 9 Pro" if dev == "lemonadep" else "OnePlus 9"
+print(g["url"]); print(v["url"])  # first two lines = GMS and Vanilla links, rest = message
 print(f"""🚀 <b>AxionOS v{g['version']} {g['romtype']} — {model} ({dev})</b>
 By <a href="https://t.me/Varakumar">T๏иy</a>
 
@@ -106,11 +109,14 @@ By <a href="https://t.me/Varakumar">T๏иy</a>
 
 #A16 #{dev} #Axion #LevionKernel""")
 OFFICIAL_PY
-    exit 0
+)
+    URL=${OUT%%$'\n'*}; OUT=${OUT#*$'\n'}
+    URL2=${OUT%%$'\n'*}; MSG=${OUT#*$'\n'}
+    BTN_LABEL="GMS" BTN2_LABEL="Vanilla" ROW2=1
 fi
 [[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] || abort "set TG_BOT_TOKEN and TG_CHAT_ID in $REPO_ROOT/.env (see .env.example)"
 JSON="$REPO_ROOT/OTA/$FLAVOR/$DEVICE.json"   # only read by the --url branch (MD5 shortcut)
-(( CUSTOM )) || {
+(( CUSTOM || OFFICIAL )) || {
     [[ -n $URL || -n "${PIXELDRAIN_API_KEY:-}" ]] || abort "set PIXELDRAIN_API_KEY in $REPO_ROOT/.env (or pass --url)"
     [[ -f $TEMPLATE ]] || abort "template $TEMPLATE not found"
 }
@@ -120,7 +126,9 @@ tg() { local m="$1"; shift; printf 'url = "https://api.telegram.org/bot%s/%s"\n'
 
 # Render: a custom --text is sent as-is; otherwise one python call parses the
 # manifest and fills the template.
-if (( CUSTOM )); then
+if (( OFFICIAL )); then
+    :
+elif (( CUSTOM )); then
     [[ $TEXT == - ]] && TEXT=$(cat)
     MSG="$TEXT"
     if [[ -n $BUTTON ]]; then BTN_LABEL="${BUTTON%%|*}"; URL="${BUTTON#*|}"; else BTN_LABEL=""; URL=""; fi
@@ -238,7 +246,10 @@ if (( EDIT )); then
 fi
 
 BOT=$(tg getMe | python3 -c 'import json,sys; d=json.load(sys.stdin); print("@"+d["result"]["username"] if d.get("ok") else "INVALID TOKEN: "+str(d.get("description")))') || abort "getMe failed"
-LINK=""; [[ -n $URL ]] && { LINK=$(curl -sL -o /dev/null -r 0-0 -w '%{http_code}' "$URL" || echo "unreachable"); }
+# ranged GET, capped: a host that ignores Range (cdn.axionos.org) would send the whole zip;
+# the status code is already in once the timeout hits
+linkcheck() { local c; c=$(curl -sL -o /dev/null -r 0-0 -m 10 -w '%{http_code}' "$1"); [[ $c == 000 ]] && c=unreachable; echo "$c"; }
+LINK=""; [[ -n $URL ]] && LINK=$(linkcheck "$URL")
 # The Recovery button links to the folder by its own share id, which opens on
 # that folder alone (a path under the Axion share would let a visitor browse
 # up). otauploader.sh shares it; no id, no button.
@@ -259,11 +270,16 @@ if [[ -n $URL ]]; then
     if (( ROW2 )); then
         echo "button:  [💬 Community] -> $COMMUNITY_URL"
         [[ -n $RECOVERY_URL ]] && echo "         [🛠 Recovery] -> $RECOVERY_URL"
-        echo "         (one row, above Download)"
+        echo "         (one row, above the download button(s))"
         [[ -n $RECOVERY_SKIP ]] && echo "         no Recovery button: $RECOVERY_SKIP is missing or not shared"
     fi
     echo "button:  [$BTN_LABEL] -> $URL"
     case "$LINK" in 200|206) echo "link:    OK (HTTP $LINK)" ;; *) echo "link:    !! HTTP $LINK -- the button will not work" ;; esac
+    if [[ -n $URL2 ]]; then
+        LINK2=$(linkcheck "$URL2")
+        echo "         [$BTN2_LABEL] -> $URL2 (same row)"
+        case "$LINK2" in 200|206) echo "link:    OK (HTTP $LINK2)" ;; *) echo "link:    !! HTTP $LINK2 -- the button will not work" ;; esac
+    fi
 else
     echo "button:  (none)"
 fi
@@ -279,7 +295,8 @@ EXTRA=()
 if sys.argv[3]=="1":
     kb.insert(0,[{"text":"💬 Community","url":sys.argv[4]}])
     if sys.argv[5]: kb[0].append({"text":"🛠 Recovery","url":sys.argv[5]})
-print(json.dumps({"inline_keyboard":kb}))' "$BTN_LABEL" "$URL" "$ROW2" "$COMMUNITY_URL" "$RECOVERY_URL")")
+if sys.argv[6]: kb[-1].append({"text":sys.argv[6],"url":sys.argv[7]})
+print(json.dumps({"inline_keyboard":kb}))' "$BTN_LABEL" "$URL" "$ROW2" "$COMMUNITY_URL" "$RECOVERY_URL" "$BTN2_LABEL" "$URL2")")
 # Banner goes out as a photo with the message as its caption (1024-char limit,
 # so longer messages fall back to plain text). tg_banner.png is a 1920px copy of
 # axion.png: sendPhoto rejects files over 10 MB.
@@ -304,7 +321,7 @@ echo "sent, message_id $MSG_ID"
 # (getChat.pinned_message, per device by its #<device> tag), so each new release
 # replaces the previous one for that device.
 # --text announcements are not releases and are left unpinned.
-if (( ! CUSTOM )); then
+if (( ! CUSTOM && PIN )); then
     tg pinChatMessage --form-string "chat_id=$TG_CHAT_ID" --form-string "message_id=$MSG_ID" \
         --form-string disable_notification=true | grep -q '"ok":true' && echo "pinned" \
         || echo "warning: pin failed -- give the bot the 'Pin messages' admin right"

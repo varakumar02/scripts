@@ -2,33 +2,44 @@
 ## Checks a keybox.xml and installs it on an AxionOS phone over adb, the same
 ## way Settings > TrickyStore > Import keybox stores it.
 ##
-##   keybox.sh <keybox.xml>        check, then install
-##   keybox.sh -n <keybox.xml>     check only
+##   keybox.sh <keybox.xml | URL>     check, then install
+##   keybox.sh -n <keybox.xml | URL>  check only
 ##
-## Checks: every private key matches the first certificate after it, and no
-## certificate serial is on Google's attestation revocation list. Install:
-## settings put secure spoof_trickystore_keybox <base64 of the XML>, then Play
-## Store is stopped so it asks for attestation again. The file may be the XML
-## or its base64. Never commit a keybox anywhere.
+## The argument is a local file or an http(s) URL (e.g. a repo's raw "key"
+## file); either may be the XML itself or its base64. Checks: every private
+## key matches the first certificate after it, and no certificate serial is on
+## Google's attestation revocation list. Install: settings put secure
+## spoof_trickystore_keybox <base64 of the XML>, then Play Store is stopped so
+## it asks for attestation again. Never commit a keybox anywhere.
 set -euo pipefail
 
 STATUS_URL=https://android.googleapis.com/attestation/status
 CHECK_ONLY=0
 [ "${1:-}" = -n ] && { CHECK_ONLY=1; shift; }
-[ $# -eq 1 ] && [ -f "$1" ] || { sed -n '2,13s/^## \{0,1\}//p' "$0"; exit 1; }
+[ $# -eq 1 ] || { sed -n '2,13s/^## \{0,1\}//p' "$0"; exit 1; }
 
 tmp=$(mktemp -d) && chmod 700 "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 
+## A URL is fetched to a temp file; the rest reads a file either way
+src=$1
+case "$src" in
+  http://*|https://*)
+    curl -fsSL --connect-timeout 15 -o "$tmp/fetched" "$src" && [ -s "$tmp/fetched" ] \
+      || { echo "download failed: $src"; exit 1; }
+    src=$tmp/fetched ;;
+esac
+[ -f "$src" ] || { echo "no such file: $src"; exit 1; }
+
 ## The stored value is the XML without BOM and surrounding whitespace
-xml=$(sed '1s/^\xEF\xBB\xBF//' "$1")
+xml=$(sed '1s/^\xEF\xBB\xBF//' "$src")
 xml=${xml#"${xml%%[![:space:]]*}"}
 if [ "${xml:0:1}" != "<" ]; then
-  xml=$(printf '%s' "$xml" | base64 -d 2>/dev/null | sed '1s/^\xEF\xBB\xBF//') || { echo "not XML and not base64: $1"; exit 1; }
+  xml=$(printf '%s' "$xml" | base64 -d 2>/dev/null | sed '1s/^\xEF\xBB\xBF//') || { echo "not XML and not base64: $src"; exit 1; }
   xml=${xml#"${xml%%[![:space:]]*}"}
-  [ "${xml:0:1}" = "<" ] || { echo "base64 does not decode to XML: $1"; exit 1; }
+  [ "${xml:0:1}" = "<" ] || { echo "base64 does not decode to XML: $src"; exit 1; }
 fi
-grep -q '<Keybox' <<< "$xml" || { echo "no <Keybox> in $1"; exit 1; }
+grep -q '<Keybox' <<< "$xml" || { echo "no <Keybox> in $src"; exit 1; }
 
 ## Split the PEM blocks: key<n>.pem, and cert<n>_<m>.pem for the m-th
 ## certificate after key n (m=1 is the leaf for that key)

@@ -36,6 +36,7 @@ KEEP_POSTS = 3        # release posts remembered per device, so a deleted one fa
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
+BUTTONS_TTL = 60          # delete an unanswered /fetch_keybox button prompt after this many seconds
 BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve", "storage",
                  "groups", "group"}
 BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs", "editbug", "fetch_keybox"}
@@ -538,7 +539,8 @@ class Bot:
             return self.api("answerCallbackQuery", callback_query_id=cqid, text="Not available here")
         source = data[len(keybox_cmd.PREFIX):]
         self.api("answerCallbackQuery", callback_query_id=cqid, text=f"Fetching {source}…")
-        threading.Thread(target=keybox_cmd.fetch, args=(self, chat, mid, source, REPO), daemon=True).start()
+        self.drop_message(chat, mid)               # remove the buttons now that a source is picked
+        threading.Thread(target=keybox_cmd.fetch, args=(self, chat, None, source, REPO), daemon=True).start()
 
     def handle(self, u):
         cq = u.get("callback_query")
@@ -789,10 +791,21 @@ class Bot:
         """No argument: show the source buttons. With one (auto/spectre/yuri/tricky/integrity): fetch it."""
         if rest:
             threading.Thread(target=keybox_cmd.fetch, args=(self, chat, mid, rest, REPO), daemon=True).start()
-        else:
-            self.api("sendMessage", chat_id=chat, text="🔑 <b>Fetch a keybox</b> — pick a source:",
+            return
+        r = self.api("sendMessage", chat_id=chat, text="🔑 <b>Fetch a keybox</b> — pick a source:",
                      parse_mode="HTML", reply_to_message_id=mid, allow_sending_without_reply="true",
                      reply_markup=keybox_cmd.keyboard())
+        bmid = r.get("message_id") if isinstance(r, dict) else None
+        if bmid is not None:                       # drop the buttons if nobody picks within a minute
+            t = threading.Timer(BUTTONS_TTL, self.drop_message, args=(chat, bmid))
+            t.daemon = True
+            t.start()
+
+    def drop_message(self, chat, mid):
+        try:
+            self.api("deleteMessage", chat_id=chat, message_id=mid)
+        except RuntimeError:
+            pass                                   # already gone (picked, or too old to delete)
 
     def timed(self, fn):
         """-> (ok, milliseconds) for one call of fn."""

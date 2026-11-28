@@ -48,11 +48,15 @@
 #
 # Usage:
 #   sh specter_keybox_fetch.sh [provider] [output-file]
-#     provider     : "auto" (default) or a catalog "source" name, e.g. TAKR;
-#                    also "yuri", "integrity", or an http(s) URL to a keybox
-#                    (raw XML or its base64). "tricky" is not fetchable here:
-#                    keybox.kowx712.cc gates downloads behind a browser CAPTCHA.
+#     provider     : "auto" (default, a random unrevoked catalog keybox) or a
+#                    catalog "source" name (e.g. TAKR, mhmrdd, Yuri); "tricky"
+#                    (or kowx) = the TAKR source, i.e. the Tricky Addon /
+#                    keybox.kowx712.cc repository Specter mirrors (no CAPTCHA
+#                    needed); "yuri" and "integrity" fetch those repos directly;
+#                    or an http(s) URL to a keybox (raw XML or its base64).
 #     output-file  : where the decoded keybox.xml is saved (default ./keybox.xml)
+#   sh specter_keybox_fetch.sh list
+#     print the whole catalog (every source/version, valid or revoked) and exit.
 #   sh specter_keybox_fetch.sh --info [keybox.xml]
 #     analyze an existing keybox.xml: print the attestation report and the
 #     VERDICT: BASIC|DEVICE|STRONG line to the terminal (no report file is
@@ -1514,9 +1518,10 @@ run_pipeline() {
     integrity)       fetch_simple "$INTEGRITY_URL" integrity; return $? ;;
     http://*|https://*) fetch_simple "$_provider" url; return $? ;;
     tricky|trickyaddon|tricky-addon|kowx)
-      log_e "KEYBOX" "tricky-addon (keybox.kowx712.cc) gates downloads behind a browser CAPTCHA"
-      log_e "KEYBOX" "download the keybox there, then pass its file path or URL as the provider"
-      return 1 ;;
+      # Specter mirrors the kowx712 (Tricky Addon) repository as the "TAKR" source,
+      # so its keyboxes are fetchable here through the catalog without the site's
+      # browser CAPTCHA. Fall through to the catalog pipeline filtered to TAKR.
+      _provider=TAKR ;;
   esac
 
   check_network || { log_e "KEYBOX" "No internet connection (catalog unreachable)"; return 1; }
@@ -1630,6 +1635,35 @@ case "$PROVIDER" in
     unset _rd_dest _rd_f
     exit 1
     ;;
+esac
+
+# list mode: show the whole catalog (every source and version, valid/revoked)
+# without fetching or installing anything.
+case "$PROVIDER" in
+  list|--list|-l)
+    echo "== Specter keybox catalog =="
+    echo "   catalog: $CATALOG_URL"
+    echo
+    check_network || { log_e "KEYBOX" "catalog unreachable"; exit 1; }
+    _lc=$(keybox_catalog || true)
+    [ -n "$_lc" ] || { log_e "KEYBOX" "empty catalog"; exit 1; }
+    # one entry per line, from the "entries" array only (the catalog also has
+    # working/latest arrays that repeat the same keyboxes)
+    _objs=$(printf '%s' "$_lc" | grep -o '"entries":\[[^]]*\]' | grep -o '{[^{}]*}')
+    printf '%s\n' "$_objs" | while IFS= read -r _o; do
+      [ -n "$_o" ] || continue
+      _s=$(printf '%s' "$_o" | sed -n 's/.*"source":"\([^"]*\)".*/\1/p')
+      _v=$(printf '%s' "$_o" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+      if printf '%s' "$_o" | grep -q '"revoked":true'; then _r="revoked"; else _r="valid"; fi
+      _ser=$(printf '%s' "$_o" | sed -n 's/.*"serial":"\([^"]*\)".*/\1/p')
+      printf '  %-12s v%-6s %-7s %s\n' "$_s" "$_v" "$_r" "$_ser"
+    done | sort
+    echo
+    _lt=$(printf '%s\n' "$_objs" | grep -c '"source"')
+    _lv=$(printf '%s\n' "$_objs" | grep -vc '"revoked":true')
+    echo "RESULT: $_lt keyboxes, $_lv not revoked. Fetch one with:"
+    echo "  $0 <source>   (e.g. TAKR = Tricky Addon)   or   yuri | integrity | auto | <URL>"
+    exit 0 ;;
 esac
 
 # --info mode: analyze an existing keybox.xml without fetching anything.

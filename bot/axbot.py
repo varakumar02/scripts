@@ -17,6 +17,7 @@ fresh directory in $OUT (also the cwd); files left there are sent back.
 """
 import base64, datetime, html, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid
 import urllib.error, urllib.parse, urllib.request, zoneinfo
+import keybox_cmd      # /fetch_keybox lives in its own module; this file only wires it in
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.expanduser("~/.config/axbot/commands.json")
@@ -37,7 +38,7 @@ MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
 BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve", "storage",
                  "groups", "group"}
-BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs", "editbug"}
+BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs", "editbug", "fetch_keybox"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
@@ -92,6 +93,7 @@ NO_ARGS = {"notes", "changelog", "cmds", "status", "ping", "storage"}
 MENU_DESC = {
     "builds": "Newest builds", "bug": "Report a bug", "bugs": "Open bugs", "editbug": "Edit a bug report",
     "changelog": "Latest changelog", "ping": "Is the bot alive", "cmds": "Custom commands", "notes": "All commands",
+    "fetch_keybox": "Fetch a keybox",
     "status": "Pi status", "sh": "Run a shell command", "post": "Dry-run a release post", "setbuild": "Mark a release post",
     "update": "Pull and restart the bot", "resolve": "Resolve bugs", "storage": "Storage report",
     "addcmd": "Add a custom command", "delcmd": "Remove a custom command",
@@ -437,7 +439,7 @@ class Bot:
                 if self.weekly_due(time.time()):
                     self.weekly_report()
                 ups = self.api("getUpdates", http_timeout=45, timeout=25, offset=self.offset,
-                               allowed_updates=["message", "my_chat_member"])
+                               allowed_updates=["message", "my_chat_member", "callback_query"])
             except Exception as e:
                 print("getUpdates:", e, file=sys.stderr, flush=True)
                 time.sleep(5)
@@ -522,7 +524,26 @@ class Bot:
         if status in ("member", "administrator", "restricted"):
             self.register_group(chat, title)
 
+    def on_callback(self, cq):
+        """Inline-button tap. Only the /fetch_keybox buttons exist; run the chosen source where that
+        command is allowed."""
+        cqid = cq.get("id")
+        data = cq.get("data") or ""
+        m = cq.get("message") or {}
+        chat = (m.get("chat") or {}).get("id")
+        mid = m.get("message_id")
+        if chat is None or not data.startswith(keybox_cmd.PREFIX):
+            return self.api("answerCallbackQuery", callback_query_id=cqid)
+        if not group_allows(self.groups, chat, self.group, self.owner, "fetch_keybox"):
+            return self.api("answerCallbackQuery", callback_query_id=cqid, text="Not available here")
+        source = data[len(keybox_cmd.PREFIX):]
+        self.api("answerCallbackQuery", callback_query_id=cqid, text=f"Fetching {source}…")
+        threading.Thread(target=keybox_cmd.fetch, args=(self, chat, mid, source, REPO), daemon=True).start()
+
     def handle(self, u):
+        cq = u.get("callback_query")
+        if cq:
+            return self.on_callback(cq)
         msg = u.get("message") or u.get("my_chat_member")
         if not msg:
             return
@@ -716,7 +737,8 @@ class Bot:
         custom = lambda access: [n for n, c in sorted(self.reg.cmds.items()) if c["access"] == access]
         block = lambda names: [f" - /{n}" for n in names]
         lines = [f"List of commands in {html.escape(self.title)}:",
-                 *block(["builds", "bug", "bugs", "editbug", "changelog", "ping", "cmds", "notes", *custom("public")])]
+                 *block(["builds", "bug", "bugs", "editbug", "changelog", "ping", "cmds", "notes", "fetch_keybox",
+                         *custom("public")])]
         if admin and custom("admin"):
             lines += ["", "[Admin only]", *block(custom("admin"))]
         if owner:
@@ -762,6 +784,15 @@ class Bot:
 
     def cmd_ping(self, chat, mid, rest, owner, msg):
         threading.Thread(target=lambda: self.say(chat, self.ping_text(), mid), daemon=True).start()
+
+    def cmd_fetch_keybox(self, chat, mid, rest, owner, msg):
+        """No argument: show the source buttons. With one (auto/spectre/yuri/tricky/integrity): fetch it."""
+        if rest:
+            threading.Thread(target=keybox_cmd.fetch, args=(self, chat, mid, rest, REPO), daemon=True).start()
+        else:
+            self.api("sendMessage", chat_id=chat, text="🔑 <b>Fetch a keybox</b> — pick a source:",
+                     parse_mode="HTML", reply_to_message_id=mid, allow_sending_without_reply="true",
+                     reply_markup=keybox_cmd.keyboard())
 
     def timed(self, fn):
         """-> (ok, milliseconds) for one call of fn."""
@@ -1113,6 +1144,13 @@ def selftest():
     assert group_allows(G, -200, -100, 7, "ping") and not group_allows(G, -200, -100, 7, "sh")  # only listed
     assert not group_allows(G, -300, -100, 7, "ping")     # disabled group: nothing
     assert not group_allows(G, -400, -100, 7, "ping")     # unknown group: nothing
+    # /fetch_keybox source resolving + buttons
+    assert keybox_cmd.resolve("") == "auto" and keybox_cmd.resolve("ADDON") == "tricky"
+    assert keybox_cmd.resolve("specter") == "spectre" and keybox_cmd.resolve("integrity") == "integrity"
+    assert keybox_cmd.resolve("nope") is None
+    _kb = keybox_cmd.keyboard()["inline_keyboard"]
+    _btn = [b["callback_data"] for row in _kb for b in row]
+    assert _btn == ["kb:auto", "kb:spectre", "kb:yuri", "kb:tricky", "kb:integrity"]
     assert is_owner({"from": {"id": 7}}, 7)
     assert not is_owner({"from": {"id": 8}}, 7)
     assert not is_owner({"from": {"id": 7}, "sender_chat": {"id": -100}}, 7)

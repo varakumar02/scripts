@@ -25,6 +25,7 @@ BUGS = os.path.expanduser("~/.config/axbot/bugs.json")
 WEEKLY = os.path.expanduser("~/.config/axbot/weekly.json")      # ISO week of the last weekly post
 WEEKLY_AT = (0, 10)          # (weekday, hour) in IST the weekly storage post goes out from: Monday 10:00
 RESTARTED = os.path.expanduser("~/.config/axbot/restarted.json")   # set by /update, read once at start
+GROUPS = os.path.expanduser("~/.config/axbot/groups.json")   # extra groups the bot was added to, owner-configured
 RUNS = os.path.expanduser("~/.cache/axbot/runs")
 LOGS = os.path.expanduser("~/.cache/axbot/logs")
 PD_API = "https://pixeldrain.com/api/"
@@ -34,7 +35,8 @@ KEEP_POSTS = 3        # release posts remembered per device, so a deleted one fa
 DEVICES = {"lemonade": "OnePlus 9", "lemonadep": "OnePlus 9 Pro"}
 MAX_UPLOAD = 50 * 1024 * 1024    # Bot API sendDocument limit
 TIMEOUT = 30 * 60
-BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve", "storage"}
+BUILTIN_OWNER = {"sh", "post", "post!", "status", "addcmd", "delcmd", "setbuild", "update", "resolve", "storage",
+                 "groups", "group"}
 BUILTIN_PUBLIC = {"start", "notes", "builds", "changelog", "cmds", "ping", "bug", "bugs", "editbug"}
 NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
@@ -93,6 +95,7 @@ MENU_DESC = {
     "status": "Pi status", "sh": "Run a shell command", "post": "Dry-run a release post", "setbuild": "Mark a release post",
     "update": "Pull and restart the bot", "resolve": "Resolve bugs", "storage": "Storage report",
     "addcmd": "Add a custom command", "delcmd": "Remove a custom command",
+    "groups": "List configured groups", "group": "Configure a group's commands",
 }
 
 
@@ -120,6 +123,16 @@ def parse_mode_for(text):
 
 def chat_allowed(chat_id, group_id, owner_id):
     return chat_id in (group_id, owner_id)
+
+
+def group_allows(groups, chat_id, group_id, owner_id, name):
+    """Whether command `name` may be handled in `chat_id`. The main group and the owner's PM are
+    unrestricted (access tiers still apply downstream); an extra group only runs the commands the
+    owner listed for it, and only while it is enabled."""
+    if chat_id in (group_id, owner_id):
+        return True
+    g = groups.get(str(chat_id))
+    return bool(g) and g.get("enabled") and name in g.get("cmds", [])
 
 
 def is_owner(msg, owner_id):
@@ -336,6 +349,7 @@ class Bot:
         # {device: [message ids, newest first]}; older files kept one bare id per device
         self.latest = {d: v if isinstance(v, list) else [v] for d, v in self.latest.items()}
         self.last_pin = None
+        self.groups = load_json(GROUPS, {})      # {str(chat_id): {title, enabled, cmds}}
         self.me = self.api("getMe")["username"]
         self.title = self.api("getChat", chat_id=self.group).get("title", "the group")
         self.pd_key = env.get("PIXELDRAIN_API_KEY", "")
@@ -377,19 +391,40 @@ class Bot:
 
     # -- update loop
 
+    def cmd_desc(self, name):
+        """Menu description for a command name (built-in or custom)."""
+        c = self.reg.cmds.get(name)
+        return MENU_DESC.get(name) or (c and (c.get("caption") or "Custom command")) or name
+
+    def save_groups(self):
+        dump_json(GROUPS, self.groups)
+
     def sync_menu(self):
         """Telegram's "/" menu shows each person only what they may run: everyone the public list, group
-        admins the admin list, the owner everything (in the group and in PM)."""
+        admins the admin list, the owner everything (in the group and in PM). Each extra group shows only
+        the commands the owner chose for it."""
         m = menus(self.reg.cmds)
-        for scope, tier in (({"type": "default"}, "public"),
-                            ({"type": "chat_administrators", "chat_id": self.group}, "admin"),
-                            ({"type": "chat_member", "chat_id": self.group, "user_id": self.owner}, "owner"),
-                            ({"type": "chat", "chat_id": self.owner}, "owner")):
+        scopes = [({"type": "default"}, "public"),
+                  ({"type": "chat_administrators", "chat_id": self.group}, "admin"),
+                  ({"type": "chat_member", "chat_id": self.group, "user_id": self.owner}, "owner"),
+                  ({"type": "chat", "chat_id": self.owner}, "owner")]
+        for scope, tier in scopes:
             if self.owner or tier != "owner":
                 try:
                     self.api("setMyCommands", commands=m[tier], scope=scope)
                 except RuntimeError as e:
                     print("setMyCommands:", e, file=sys.stderr, flush=True)
+        for gid, g in self.groups.items():
+            scope = {"type": "chat", "chat_id": int(gid)}
+            try:
+                if g.get("enabled") and g.get("cmds"):
+                    cmds = [{"command": n, "description": self.cmd_desc(n)[:256] or n}
+                            for n in g["cmds"] if NAME_RE.match(n)]
+                    self.api("setMyCommands", commands=cmds, scope=scope)
+                else:
+                    self.api("deleteMyCommands", scope=scope)
+            except RuntimeError as e:
+                print("setMyCommands(group):", e, file=sys.stderr, flush=True)
 
     def run(self):
         self.offset = None
@@ -454,33 +489,69 @@ class Bot:
         json.dump(self.latest, open(tmp, "w"))
         os.replace(tmp, LATEST)
 
+    def notify_owner(self, text):
+        if self.owner:
+            self.say(self.owner, text)
+
+    def register_group(self, chat, title):
+        """Record a newly-seen extra group (disabled, no commands) and tell the owner how to set it up."""
+        if str(chat) in self.groups:
+            return
+        self.groups[str(chat)] = {"title": title or str(chat), "enabled": False, "cmds": []}
+        self.save_groups()
+        self.sync_menu()
+        print(f"registered new group {chat} {title!r}", flush=True)
+        self.notify_owner(
+            f"➕ Added to <b>{html.escape(title or str(chat))}</b> (<code>{chat}</code>).\n"
+            f"I answer nothing there yet. In this chat:\n"
+            f"<code>/group {chat} cmds builds changelog ping</code> to pick commands, then "
+            f"<code>/group {chat} on</code>.\nManage with /groups.")
+
+    def on_membership(self, chat, mcm):
+        """my_chat_member: the bot was added to or removed from a chat."""
+        if chat in (self.group, self.owner):
+            return
+        status = (mcm.get("new_chat_member") or {}).get("status")
+        title = mcm.get("chat", {}).get("title")
+        if status in ("left", "kicked"):
+            if self.groups.pop(str(chat), None) is not None:
+                self.save_groups()
+                self.sync_menu()
+                self.notify_owner(f"➖ Removed from <b>{html.escape(title or str(chat))}</b> (<code>{chat}</code>).")
+            return
+        if status in ("member", "administrator", "restricted"):
+            self.register_group(chat, title)
+
     def handle(self, u):
         msg = u.get("message") or u.get("my_chat_member")
         if not msg:
             return
         chat = msg["chat"]["id"]
         private = msg["chat"]["type"] == "private"
-        if not chat_allowed(chat, self.group, self.owner):
-            print(f"ignored update from chat {chat} ({msg['chat']['type']})", flush=True)
+        if "my_chat_member" in u:                 # added to / removed from a chat
+            return self.on_membership(chat, msg)
+        if chat not in (self.group, self.owner) and str(chat) not in self.groups:
+            # an extra group the bot was added to while offline (no my_chat_member seen): register it,
+            # tell the owner, and stay silent until the owner enables it from their PM. A stranger's PM
+            # is ignored.
             if not private:
-                print(f"leaving foreign chat {chat} {msg['chat'].get('title')!r}", flush=True)
-                try:
-                    self.api("leaveChat", chat_id=chat)
-                except RuntimeError:
-                    pass
-            return
-        if "my_chat_member" in u:
+                self.register_group(chat, msg["chat"].get("title"))
+            else:
+                print(f"ignored PM from {chat}", flush=True)
             return
         if "pinned_message" in msg and chat == self.group:     # a person pinned something
             self.remember(msg["pinned_message"])
-        for m in msg.get("new_chat_members", []):
-            if not m.get("is_bot"):
-                self.say(chat, f"Welcome, {html.escape(m.get('first_name', ''))}! "
-                               "Newest builds: /builds · commands: /notes · found a bug? /bug")
+        if chat == self.group:
+            for m in msg.get("new_chat_members", []):
+                if not m.get("is_bot"):
+                    self.say(chat, f"Welcome, {html.escape(m.get('first_name', ''))}! "
+                                   "Newest builds: /builds · commands: /notes · found a bug? /bug")
         parsed = parse_command(msg.get("text"), self.me)
         if not parsed:
             return
         name, rest, addressed = parsed
+        if not group_allows(self.groups, chat, self.group, self.owner, name):
+            return      # extra group: this command is not enabled here, stay silent
         owner = is_owner(msg, self.owner)
         print(f"chat {chat} from {msg.get('from', {}).get('id')}{' (owner)' if owner else ''}: /{name}", flush=True)
         mid = msg["message_id"]
@@ -650,7 +721,8 @@ class Bot:
             lines += ["", "[Admin only]", *block(custom("admin"))]
         if owner:
             lines += ["", "[Owner only]", *block(["status", "sh", "post", "post!", "setbuild", "update", "bugs all",
-                                                  "resolve", "storage", "addcmd", "delcmd", *custom("owner")])]
+                                                  "resolve", "storage", "addcmd", "delcmd", "groups", "group",
+                                                  *custom("owner")])]
         return "\n".join(lines + ["", "You can run these by tapping them, or by typing /command"])
 
     def cmd_notes(self, chat, mid, rest, owner, msg):
@@ -959,6 +1031,60 @@ class Bot:
         err = self.reg.remove(rest) if rest else "usage: /delcmd <name>"
         self.meh(chat, mid, err) if err else (self.sync_menu(), self.say(chat, f"removed /{rest}", mid))
 
+    def cmd_groups(self, chat, mid, rest, owner, msg):
+        """List the extra groups the bot is in and how each is configured (owner's PM only)."""
+        if msg["chat"]["type"] != "private":
+            return self.say(chat, "Configure groups in my DM.", mid)
+        if not self.groups:
+            return self.say(chat, "No extra groups yet. Add me to a group and it shows up here.", mid)
+        lines = ["<b>Groups</b>"]
+        for gid, g in self.groups.items():
+            state = "🟢 on" if g.get("enabled") else "⚪ off"
+            cmds = html.escape(" ".join(g.get("cmds", [])) or "(none)")
+            lines.append(f"\n<b>{html.escape(g.get('title') or gid)}</b> <code>{gid}</code> — {state}\n  {cmds}")
+        avail = sorted((BUILTIN_PUBLIC - {"start"}) | set(self.reg.cmds))
+        lines.append("\nPick from: <code>" + html.escape(" ".join(avail)) + "</code>")
+        lines.append("<code>/group &lt;id&gt; cmds builds ping</code> · <code>/group &lt;id&gt; on|off|leave</code>")
+        self.say(chat, "\n".join(lines), mid)
+
+    def cmd_group(self, chat, mid, rest, owner, msg):
+        """Configure one extra group (owner's PM only): /group <id> on|off|leave|cmds <names...>."""
+        if msg["chat"]["type"] != "private":
+            return self.say(chat, "Configure groups in my DM.", mid)
+        args = split_args(rest)
+        if len(args) < 2:
+            return self.say(chat, "<code>/group &lt;id&gt; on|off|leave|cmds &lt;names...&gt;</code> — see /groups", mid)
+        gid, action, rest_args = args[0], args[1].lower(), args[2:]
+        g = self.groups.get(gid)
+        if not g:
+            return self.say(chat, f"No group <code>{html.escape(gid)}</code>. See /groups.", mid)
+        if action == "leave":
+            try:
+                self.api("leaveChat", chat_id=int(gid))
+            except (RuntimeError, ValueError) as e:
+                return self.say(chat, f"leave failed: {html.escape(str(e))}", mid)
+            del self.groups[gid]
+            self.save_groups()
+            self.sync_menu()
+            return self.say(chat, f"Left and forgot <code>{html.escape(gid)}</code>.", mid)
+        if action == "on":
+            g["enabled"] = True
+        elif action == "off":
+            g["enabled"] = False
+        elif action == "cmds":
+            known = (BUILTIN_PUBLIC | BUILTIN_OWNER | set(self.reg.cmds)) - {"start"}
+            bad = [c for c in rest_args if c not in known]
+            if bad:
+                return self.say(chat, "Unknown command(s): <code>" + html.escape(" ".join(bad)) + "</code>", mid)
+            g["cmds"] = rest_args
+        else:
+            return self.say(chat, "Use on, off, leave or cmds.", mid)
+        self.save_groups()
+        self.sync_menu()
+        state = "on" if g.get("enabled") else "off"
+        self.say(chat, f"<b>{html.escape(g.get('title') or gid)}</b> — {state}, commands: "
+                       f"<code>{html.escape(' '.join(g.get('cmds', [])) or '(none)')}</code>", mid)
+
 
 def selftest():
     m = menus({"a": {"access": "admin", "cmd": "x"}, "o": {"access": "owner", "cmd": "y", "caption": "cap"}})
@@ -981,6 +1107,12 @@ def selftest():
     assert parse_command("hello", "axbot") is None
     assert parse_command("/post! --beta", "axbot") == ("post!", "--beta", False)
     assert chat_allowed(-100, -100, 7) and chat_allowed(7, -100, 7) and not chat_allowed(-200, -100, 7)
+    # extra-group gating: main group + owner PM unrestricted; a listed+enabled extra group runs only its own cmds
+    G = {"-200": {"enabled": True, "cmds": ["ping", "builds"]}, "-300": {"enabled": False, "cmds": ["ping"]}}
+    assert group_allows(G, -100, -100, 7, "sh") and group_allows(G, 7, -100, 7, "sh")      # main group / PM: any
+    assert group_allows(G, -200, -100, 7, "ping") and not group_allows(G, -200, -100, 7, "sh")  # only listed
+    assert not group_allows(G, -300, -100, 7, "ping")     # disabled group: nothing
+    assert not group_allows(G, -400, -100, 7, "ping")     # unknown group: nothing
     assert is_owner({"from": {"id": 7}}, 7)
     assert not is_owner({"from": {"id": 8}}, 7)
     assert not is_owner({"from": {"id": 7}, "sender_chat": {"id": -100}}, 7)
@@ -999,6 +1131,7 @@ def selftest():
         # /notes and /cmds: each role sees exactly what it may run, in the group and in a PM alike
         b = Bot.__new__(Bot)
         b.group, b.me, b.title, b.reg, out = -100, "axbot", "Axion & co", Registry(os.path.join(d, "h.json")), []
+        b.groups = {}
         for n, acc in (("pub", "public"), ("adm", "admin"), ("own", "owner")):
             b.reg.add(n, acc, "true")
         b.say = lambda chat, text, reply=None, pre=False: out.append((chat, text))

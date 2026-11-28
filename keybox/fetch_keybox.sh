@@ -1517,6 +1517,9 @@ run_pipeline() {
     yuri)            fetch_simple "$YURI_URL" yuri; return $? ;;
     integrity)       fetch_simple "$INTEGRITY_URL" integrity; return $? ;;
     http://*|https://*) fetch_simple "$_provider" url; return $? ;;
+    spectre|specter)
+      # the whole Specter catalog: pick a random unrevoked keybox (same as "auto")
+      _provider=auto ;;
     tricky|trickyaddon|tricky-addon|kowx)
       # Specter mirrors the kowx712 (Tricky Addon) repository as the "TAKR" source,
       # so its keyboxes are fetchable here through the catalog without the site's
